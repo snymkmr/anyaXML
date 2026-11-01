@@ -87,90 +87,89 @@ export function activate(context: vscode.ExtensionContext): void {
   const pendingValidations = new Set<string>();
   let largeFileValidationState: LargeFileValidationState | undefined;
   let pendingLargeFileValidation: vscode.Uri | undefined;
-  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   statusBar.name = "AnyaXML XML Validation";
 
   const updateStatusBar = (): void => {
-    const document = vscode.window.activeTextEditor?.document;
-    if (!isXmlDocument(document)) {
-      const largeFile = pendingLargeFileValidation ? undefined : largeFileValidationState;
-      if (pendingLargeFileValidation) {
-        statusBar.show();
-        statusBar.command = {
-          command: "anyaxml.validateXml",
-          title: "Validate XML",
-          arguments: [pendingLargeFileValidation]
-        };
-        statusBar.text = `$(sync~spin) XML: Checking ${path.basename(pendingLargeFileValidation.fsPath)}`;
-        statusBar.color = undefined;
-        statusBar.tooltip = `Checking ${pendingLargeFileValidation.fsPath}…`;
-        return;
-      }
-      if (!largeFile) {
-        statusBar.hide();
-        return;
-      }
-
+    if (pendingLargeFileValidation) {
       statusBar.show();
       statusBar.command = {
         command: "anyaxml.validateXml",
-        title: "Validate XML",
+        title: "Refresh XML validation",
+        arguments: [pendingLargeFileValidation]
+      };
+      statusBar.text = "$(sync~spin) XML";
+      statusBar.color = undefined;
+      statusBar.tooltip = `Checking ${path.basename(pendingLargeFileValidation.fsPath)}…`;
+      return;
+    }
+
+    if (largeFileValidationState) {
+      const largeFile = largeFileValidationState;
+      statusBar.show();
+      statusBar.command = {
+        command: "anyaxml.validateXml",
+        title: "Refresh XML validation",
         arguments: [largeFile.uri]
       };
+      statusBar.text = "$(circle-filled) XML";
       const fileName = path.basename(largeFile.uri.fsPath);
       if (largeFile.isValid) {
-        statusBar.text = `$(check) XML: Valid (${fileName})`;
         statusBar.color = new vscode.ThemeColor("testing.iconPassed");
-        statusBar.tooltip = `${fileName} is well-formed. Click to validate again.`;
+        statusBar.tooltip = `${fileName} has no XML syntax errors. Click to refresh validation.`;
       } else {
-        statusBar.text = `$(error) XML: Error (${fileName})`;
+        statusBar.text = `$(circle-filled) XML: ${formatStatusBarIssue(`Line ${largeFile.line}, column ${largeFile.column}: ${largeFile.message ?? "XML syntax error"}`)}`;
         statusBar.color = new vscode.ThemeColor("testing.iconFailed");
-        statusBar.tooltip = `${fileName}, line ${largeFile.line}, column ${largeFile.column}: ${largeFile.message}\nClick to validate again.`;
+        statusBar.tooltip = `${fileName}, line ${largeFile.line}, column ${largeFile.column}: ${largeFile.message}\nClick to refresh validation.`;
       }
+      return;
+    }
+
+    const document = vscode.window.activeTextEditor?.document;
+    if (!isXmlDocument(document)) {
+      statusBar.hide();
       return;
     }
 
     statusBar.show();
     statusBar.command = {
       command: "anyaxml.validateXml",
-      title: "Validate XML",
+      title: "Refresh XML validation",
       arguments: [document.uri]
     };
     const key = document.uri.toString();
     if (pendingValidations.has(key)) {
-      statusBar.text = "$(sync~spin) XML: Checking";
+      statusBar.text = "$(sync~spin) XML";
       statusBar.color = undefined;
       statusBar.tooltip = "Checking XML syntax…";
       return;
     }
 
     const state = validationStates.get(key);
+    statusBar.text = "$(circle-filled) XML";
     if (!state) {
-      statusBar.text = "$(question) XML: Not checked";
-      statusBar.color = undefined;
-      statusBar.tooltip = "Click to validate this XML document.";
+      statusBar.color = new vscode.ThemeColor("testing.iconFailed");
+      statusBar.tooltip = "XML has not been validated. Click to refresh validation.";
       return;
     }
 
     if (state.version !== document.version) {
-      statusBar.text = "$(warning) XML: Needs validation";
-      statusBar.color = undefined;
-      statusBar.tooltip = "This document has changed since its last validation. Click to validate it.";
+      statusBar.color = new vscode.ThemeColor("testing.iconFailed");
+      statusBar.tooltip = "XML changed since the last validation. Click to refresh validation.";
       return;
     }
 
     if (!state.diagnostic) {
-      statusBar.text = "$(check) XML: Valid";
       statusBar.color = new vscode.ThemeColor("testing.iconPassed");
-      statusBar.tooltip = "XML is well-formed. Click to validate again.";
+      statusBar.tooltip = "No XML syntax errors. Click to refresh validation.";
       return;
     }
 
     const line = state.diagnostic.range.start.line + 1;
     const column = state.diagnostic.range.start.character + 1;
-    statusBar.text = `$(error) XML: syntax error at ${line}:${column}`;
+    statusBar.text = `$(circle-filled) XML: ${formatStatusBarIssue(`Line ${line}, column ${column}: ${state.diagnostic.message}`)}`;
     statusBar.color = new vscode.ThemeColor("testing.iconFailed");
-    statusBar.tooltip = `Line ${line}, column ${column}: ${state.diagnostic.message}\nClick to validate again.`;
+    statusBar.tooltip = `Line ${line}, column ${column}: ${state.diagnostic.message}\nClick to refresh validation.`;
   };
 
   const validateNow = (document: vscode.TextDocument): void => {
@@ -512,9 +511,7 @@ export function activate(context: vscode.ExtensionContext): void {
             updateStatusBar();
           }
 
-          if (largeFileValidationState.isValid) {
-            void vscode.window.showInformationMessage(`${path.basename(resource.fsPath)} is well-formed.`);
-          } else {
+          if (!largeFileValidationState.isValid) {
             void vscode.window.showWarningMessage(
               `${path.basename(resource.fsPath)} has an XML syntax error at line ${largeFileValidationState.line}, column ${largeFileValidationState.column}: ${largeFileValidationState.message}`
             );
@@ -543,9 +540,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     validateNow(document);
     const state = validationStates.get(document.uri.toString());
-    if (!state?.diagnostic) {
-      void vscode.window.showInformationMessage("XML is well-formed.");
-    } else {
+    if (state?.diagnostic) {
       void vscode.window.showWarningMessage("XML validation found a syntax error. See the Problems panel and status bar for its location.");
     }
   }
@@ -579,6 +574,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
+      if (largeFileValidationState && document?.uri.toString() !== largeFileValidationState.uri.toString()) {
+        largeFileValidationState = undefined;
+      }
       if (isXmlDocument(document) && !validationStates.has(document.uri.toString())) {
         scheduleValidation(document);
       } else {
@@ -835,7 +833,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
+function formatStatusBarIssue(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 80 ? `${normalized.slice(0, 79)}…` : normalized;
+}
+
+export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   const objectCandidates: XmlTableCandidate[] = [];
   const scalarCandidates: Array<{ path: string; values: unknown[]; depth: number }> = [];
 
@@ -912,7 +915,7 @@ function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   };
 }
 
-async function buildXmlTablePreviewFromFile(filePath: string): Promise<XmlTablePreview> {
+export async function buildXmlTablePreviewFromFile(filePath: string): Promise<XmlTablePreview> {
   const statistics = new Map<string, XmlPathStat>();
   const scanStack: XmlStreamFrame[] = [];
 
@@ -968,7 +971,7 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
       const rightStat = right[1];
       const leftShape = (leftStat.childCount + leftStat.attributeCount) / leftStat.count;
       const rightShape = (rightStat.childCount + rightStat.attributeCount) / rightStat.count;
-      return rightShape - leftShape || rightStat.count - leftStat.count || leftStat.depth - rightStat.depth;
+      return rightShape - leftShape || leftStat.depth - rightStat.depth || rightStat.count - leftStat.count;
     });
   if (repeatedRecords.length > 0) {
     return repeatedRecords[0][0];
@@ -1034,6 +1037,20 @@ function createXmlPreviewNode(name: string, attributes: Record<string, string>):
   return { name, attributes, text: [], children: new Map<string, XmlPreviewNode[]>() };
 }
 
+function containsNestedRepeatedRecordGroup(node: XmlPreviewNode): boolean {
+  for (const children of node.children.values()) {
+    if (children.length > 1 && children.some((child) =>
+      child.children.size > 0 || Object.keys(child.attributes).length > 0
+    )) {
+      return true;
+    }
+    if (children.some(containsNestedRepeatedRecordGroup)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function flattenXmlPreviewNode(node: XmlPreviewNode): Record<string, string> {
   const flattened = Object.create(null) as Record<string, string>;
   const flatten = (current: XmlPreviewNode, prefix: string): void => {
@@ -1054,10 +1071,10 @@ function flattenXmlPreviewNode(node: XmlPreviewNode): Record<string, string> {
       );
       if (simpleValues) {
         flattened[columnPath] = children.map((child) => child.text.join("").trim()).join(", ");
-      } else if (children.length === 1) {
+      } else if (children.length === 1 && containsNestedRepeatedRecordGroup(children[0])) {
         flatten(children[0], columnPath);
       } else {
-        flattened[columnPath] = JSON.stringify(children.map(flattenXmlPreviewNode));
+        children.forEach((child, index) => flatten(child, `${columnPath}[${index + 1}]`));
       }
     }
   };
@@ -1130,10 +1147,12 @@ function flattenXmlRecord(record: Record<string, unknown>): Record<string, strin
   const flattened = Object.create(null) as Record<string, string>;
   const addValue = (value: unknown, columnPath: string): void => {
     if (Array.isArray(value)) {
-      if (value.length === 1 && isRecord(value[0])) {
-        addValue(value[0], columnPath);
-      } else if (value.length > 0 && value.every(isRecord)) {
-        flattened[columnPath] = JSON.stringify(value.map((item) => flattenXmlRecord(item as Record<string, unknown>)));
+      if (value.length > 0 && value.every(isRecord)) {
+        if (value.length === 1 && containsNestedRecordArray(value[0])) {
+          addValue(value[0], columnPath);
+        } else {
+          value.forEach((item, index) => addValue(item, `${columnPath}[${index + 1}]`));
+        }
       } else {
         flattened[columnPath] = value.map(formatXmlValue).join(", ");
       }
@@ -1169,6 +1188,12 @@ function collectColumns(rows: Array<Record<string, string>>): string[] {
     }
   }
   return [...columns];
+}
+
+function containsNestedRecordArray(record: Record<string, unknown>): boolean {
+  return Object.values(record).some((value) =>
+    Array.isArray(value) && value.length > 0 && value.every(isRecord)
+  );
 }
 
 function formatXmlValue(value: unknown): string {
@@ -1503,7 +1528,8 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(fileName)} table preview</title>
   <style>
-    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); padding: 0 18px 18px; }
+    * { box-sizing: border-box; }
+    body { display: flex; flex-direction: column; height: 100vh; margin: 0; overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); padding: 0 18px 12px; }
     h1 { font-size: 18px; font-weight: 600; margin: 18px 0 12px; }
     .title-bar { display: flex; align-items: center; gap: 12px; }
     .title-bar h1 { overflow-wrap: anywhere; }
@@ -1520,9 +1546,11 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
     .title-actions .excel-export-button:hover:not(:disabled) { background: #185c37; }
     .title-actions .excel-export-button:disabled { cursor: default; opacity: .5; }
     .excel-mark { display: inline-grid; place-items: center; width: 17px; height: 17px; border: 1px solid rgba(255,255,255,.8); border-radius: 2px; font-size: 11px; line-height: 1; font-weight: 700; }
-    .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
-    .page-size-control { justify-content: flex-end; }
-    .pagination { justify-content: flex-end; margin-top: 10px; }
+    .controls { display: flex; flex: 0 0 auto; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .page-size-control { justify-content: flex-end; margin: 6px 0 0; }
+    .table-pagination { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 8px; }
+    .page-info { flex: 0 0 auto; color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; }
+    .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0; }
     .pagination button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; }
     .pagination button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
     .pagination button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -1530,8 +1558,8 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
     input { flex: 1; min-width: 120px; }
     button { cursor: pointer; }
     button:disabled { cursor: default; opacity: .5; }
-    .meta { display: flex; justify-content: space-between; color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 10px; }
-    .table-wrap { max-height: calc(100vh - 150px); overflow: auto; border: 1px solid var(--vscode-panel-border); }
+    .meta { display: flex; flex: 0 0 auto; justify-content: space-between; color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 8px; }
+    .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; border: 1px solid var(--vscode-panel-border); }
     table { border-collapse: collapse; min-width: 100%; white-space: pre-wrap; }
     th, td { border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); padding: 7px 10px; text-align: left; vertical-align: top; }
     thead th { background: var(--vscode-editorStickyScroll-background, var(--vscode-sideBar-background)); position: sticky; top: 0; z-index: 1; }
@@ -1545,15 +1573,18 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
   <div class="controls">
     <input id="filter" type="search" placeholder="Filter rows…" aria-label="Filter rows" disabled>
   </div>
-  <div class="meta"><span id="element">Element: XML</span><span id="page-info">Loading XML data…</span></div>
+  <div class="meta"><span id="element">Element: XML</span></div>
+  <div class="table-pagination">
+    <div id="page-info" class="page-info">Loading XML data…</div>
+    <div class="pagination" aria-label="Table pagination">
+      <button id="previous" type="button" title="Previous page" aria-label="Previous page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 18l-6-6 6-6"/></svg></button>
+      <button id="next" type="button" title="Next page" aria-label="Next page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18l6-6-6-6"/></svg></button>
+    </div>
+  </div>
   <div class="table-wrap"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table><div id="status">Loading XML data…</div></div>
   <div class="controls page-size-control">
     <label for="page-size">Rows per page</label>
     <select id="page-size" aria-label="Rows per page" disabled><option>25</option><option selected>50</option><option>100</option><option>200</option></select>
-  </div>
-  <div class="controls pagination" aria-label="Table pagination">
-    <button id="previous" type="button" title="Previous page" aria-label="Previous page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 18l-6-6 6-6"/></svg></button>
-    <button id="next" type="button" title="Next page" aria-label="Next page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18l6-6-6-6"/></svg></button>
   </div>
   <script nonce="${nonce}">
     (() => {
@@ -1625,8 +1656,9 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
         head.appendChild(header);
         for (let index = 0; index < result.rows.length; index += 1) {
           const row = result.rows[index];
+          const rowNumber = result.page * result.pageSize + index + 1;
           const tr = document.createElement('tr');
-          tr.appendChild(makeCell('th', String(result.page * result.pageSize + index + 1), 'row-number'));
+          tr.appendChild(makeCell('th', String(rowNumber), 'row-number'));
           for (const column of result.columns) tr.appendChild(makeCell('td', row[column] || ''));
           body.appendChild(tr);
         }
