@@ -14,7 +14,18 @@ try {
   Module._load = originalLoad;
 }
 
-const { validateXml } = extension;
+const { validateXml, getFilteredXmlTableRows } = extension;
+
+test('supports case-insensitive exact-value filtering', () => {
+  const preview = {
+    columns: ['city'],
+    rows: [{ city: 'Toronto' }, { city: 'Toronto West' }]
+  };
+
+  assert.equal(getFilteredXmlTableRows(preview, 'toro').length, 2);
+  assert.deepEqual(getFilteredXmlTableRows(preview, 'toronto', true), [{ city: 'Toronto' }]);
+  assert.deepEqual(getFilteredXmlTableRows(preview, '  TORONTO  ', true), [{ city: 'Toronto' }]);
+});
 
 test('validates well-formed XML and reports malformed XML locations', () => {
   assert.equal(validateXml('<root><item>value</item></root>'), true);

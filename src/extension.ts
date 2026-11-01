@@ -373,20 +373,39 @@ export function activate(context: vscode.ExtensionContext): void {
       { enableScripts: true }
     );
     panel.webview.html = renderXmlTablePreview(panel.webview, fileName);
+    let previewWindowMode: "main" | "poppedOut" = "main";
 
-    const sendPage = (filter: string, page: number, pageSize: number, requestId: number): void => {
+    const sendPage = (
+      filter: string,
+      page: number,
+      pageSize: number,
+      requestId: number,
+      exactMatch = false
+    ): void => {
       if (!preview) {
         return;
       }
-      void panel.webview.postMessage(queryXmlTable(preview, filter, page, pageSize, requestId));
+      void panel.webview.postMessage(queryXmlTable(preview, filter, page, pageSize, requestId, exactMatch));
     };
     const messageSubscription = panel.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRecord(message)) {
         return;
       }
-      if (message.type === "popout") {
-        void vscode.commands.executeCommand("workbench.action.moveEditorToNewWindow").then(undefined, (error: unknown) => {
-          void vscode.window.showErrorMessage(`Could not pop out the XML preview: ${errorMessage(error)}`);
+      if (message.type === "windowAction" || message.type === "popout") {
+        const currentMode = previewWindowMode;
+        const nextMode = message.mode === "main" || message.mode === "poppedOut"
+          ? message.mode
+          : currentMode === "poppedOut" ? "main" : "poppedOut";
+        const isPoppedOut = nextMode === "main";
+        const command = isPoppedOut
+          ? "workbench.action.restoreEditorsToMainWindow"
+          : "workbench.action.moveEditorToNewWindow";
+        previewWindowMode = nextMode;
+        void panel.webview.postMessage({ type: "windowMode", mode: nextMode });
+        void vscode.commands.executeCommand(command).then(undefined, (error: unknown) => {
+          previewWindowMode = currentMode;
+          void vscode.window.showErrorMessage(`Could not ${isPoppedOut ? "pop in" : "pop out"} the XML preview: ${errorMessage(error)}`);
+          void panel.webview.postMessage({ type: "windowMode", mode: previewWindowMode });
         });
         return;
       }
@@ -432,11 +451,15 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         const sourceUri = largeFilePath ? vscode.Uri.file(largeFilePath) : document?.uri;
         const filter = typeof message.filter === "string" ? message.filter : "";
-        void exportXmlPreviewForExcel(preview, sourceUri, fileName, filter)
+        void exportXmlPreviewForExcel(preview, sourceUri, fileName, filter, message.exactMatch === true)
           .catch((error: unknown) => vscode.window.showErrorMessage(`Could not export Excel workbook: ${errorMessage(error)}`));
         return;
       }
       if (message.type === "ready") {
+        if (message.mode === "main" || message.mode === "poppedOut") {
+          previewWindowMode = message.mode;
+        }
+        void panel.webview.postMessage({ type: "windowMode", mode: previewWindowMode });
         if (preview) {
           sendPage("", 0, 50, 0);
         }
@@ -447,7 +470,8 @@ export function activate(context: vscode.ExtensionContext): void {
           typeof message.filter === "string" ? message.filter : "",
           typeof message.page === "number" ? message.page : 0,
           typeof message.pageSize === "number" ? message.pageSize : 50,
-          typeof message.requestId === "number" ? message.requestId : 0
+          typeof message.requestId === "number" ? message.requestId : 0,
+          message.exactMatch === true
         );
       }
     });
@@ -1169,10 +1193,11 @@ function queryXmlTable(
   filter: string,
   requestedPage: number,
   requestedPageSize: number,
-  requestId: number
+  requestId: number,
+  exactMatch = false
 ): XmlTablePage {
   const pageSize = [25, 50, 100, 200].includes(requestedPageSize) ? requestedPageSize : 50;
-  const filteredRows = getFilteredXmlTableRows(preview, filter);
+  const filteredRows = getFilteredXmlTableRows(preview, filter, exactMatch);
   const pageCount = Math.ceil(filteredRows.length / pageSize);
   const page = Math.min(Math.max(0, Math.floor(requestedPage)), Math.max(0, pageCount - 1));
   return {
@@ -1187,14 +1212,17 @@ function queryXmlTable(
   };
 }
 
-function getFilteredXmlTableRows(
+export function getFilteredXmlTableRows(
   preview: XmlTablePreview,
-  filter: string
+  filter: string,
+  exactMatch = false
 ): Array<Record<string, string>> {
   const normalizedFilter = filter.trim().toLocaleLowerCase();
   return normalizedFilter
     ? preview.rows.filter((row) => preview.columns.some((column) =>
-      (row[column] ?? "").toLocaleLowerCase().includes(normalizedFilter)
+      exactMatch
+        ? (row[column] ?? "").toLocaleLowerCase() === normalizedFilter
+        : (row[column] ?? "").toLocaleLowerCase().includes(normalizedFilter)
     ))
     : preview.rows;
 }
@@ -1438,9 +1466,10 @@ async function exportXmlPreviewForExcel(
   preview: XmlTablePreview,
   sourceUri: vscode.Uri | undefined,
   fallbackName: string,
-  filter: string
+  filter: string,
+  exactMatch: boolean
 ): Promise<void> {
-  const rows = getFilteredXmlTableRows(preview, filter).map((row) =>
+  const rows = getFilteredXmlTableRows(preview, filter, exactMatch).map((row) =>
     preview.columns.map((column) => row[column] ?? "")
   );
   const sourcePath = sourceUri?.scheme === "file" ? sourceUri.fsPath : "";
@@ -1481,12 +1510,18 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
     .title-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: 0 0 auto; }
     .icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
     .icon-button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+    #window-action[data-window-mode="poppedOut"] .pop-in-icon { display: block; }
+    #window-action[data-window-mode="poppedOut"] .pop-out-icon { display: none; }
+    .pop-in-icon { display: none; }
+    .icon-button[data-exact-match="true"] { background: var(--vscode-toolbar-activeBackground, var(--vscode-list-activeSelectionBackground)); border-color: var(--vscode-focusBorder); }
+    .icon-button:disabled { cursor: default; opacity: .5; }
     .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
     .title-actions .excel-export-button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 4px 9px; color: #fff; background: #217346; border: 1px solid #185c37; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
     .title-actions .excel-export-button:hover:not(:disabled) { background: #185c37; }
     .title-actions .excel-export-button:disabled { cursor: default; opacity: .5; }
     .excel-mark { display: inline-grid; place-items: center; width: 17px; height: 17px; border: 1px solid rgba(255,255,255,.8); border-radius: 2px; font-size: 11px; line-height: 1; font-weight: 700; }
     .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .page-size-control { justify-content: flex-end; }
     .pagination { justify-content: flex-end; margin-top: 10px; }
     .pagination button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; }
     .pagination button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
@@ -1506,14 +1541,16 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
   </style>
 </head>
 <body>
-  <div class="title-bar"><h1>${escapeHtml(fileName)}</h1><div class="title-actions"><button id="export-excel" class="excel-export-button" type="button" title="Export all filtered rows as an Excel workbook (.xlsx)" aria-label="Export all filtered rows as an Excel workbook (.xlsx)" disabled><span class="excel-mark" aria-hidden="true">X</span><span>Export</span></button><button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button><button id="pop-out" class="icon-button" type="button" title="Pop out preview" aria-label="Pop out preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg></button></div></div>
+  <div class="title-bar"><h1>${escapeHtml(fileName)}</h1><div class="title-actions"><button id="export-excel" class="excel-export-button" type="button" title="Export all filtered rows as an Excel workbook (.xlsx)" aria-label="Export all filtered rows as an Excel workbook (.xlsx)" disabled><span class="excel-mark" aria-hidden="true">X</span><span>Export</span></button><button id="exact-filter" class="icon-button" data-exact-match="false" type="button" aria-pressed="false" title="Exact filtering off" aria-label="Exact filtering off" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v5l-4 2v-7z"/><path d="M16 17h6M16 20h6"/></svg></button><button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button><button id="window-action" class="icon-button" data-window-mode="main" type="button" title="Pop out preview" aria-label="Pop out preview"><svg class="pop-out-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg><svg class="pop-in-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 12 12"/><path d="M12 6v6h6"/><path d="M15 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h7"/></svg></button></div></div>
   <div class="controls">
     <input id="filter" type="search" placeholder="Filter rows…" aria-label="Filter rows" disabled>
-    <label for="page-size">Rows per page</label>
-    <select id="page-size" aria-label="Rows per page" disabled><option>25</option><option selected>50</option><option>100</option><option>200</option></select>
   </div>
   <div class="meta"><span id="element">Element: XML</span><span id="page-info">Loading XML data…</span></div>
   <div class="table-wrap"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table><div id="status">Loading XML data…</div></div>
+  <div class="controls page-size-control">
+    <label for="page-size">Rows per page</label>
+    <select id="page-size" aria-label="Rows per page" disabled><option>25</option><option selected>50</option><option>100</option><option>200</option></select>
+  </div>
   <div class="controls pagination" aria-label="Table pagination">
     <button id="previous" type="button" title="Previous page" aria-label="Previous page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 18l-6-6 6-6"/></svg></button>
     <button id="next" type="button" title="Next page" aria-label="Next page" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18l6-6-6-6"/></svg></button>
@@ -1530,15 +1567,33 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
       const status = document.getElementById('status');
       const pageInfo = document.getElementById('page-info');
       const element = document.getElementById('element');
-      const popOut = document.getElementById('pop-out');
+      const windowAction = document.getElementById('window-action');
+      let windowMode = api.getState()?.windowMode === 'poppedOut' ? 'poppedOut' : 'main';
+      const updateWindowMode = (mode) => {
+        windowMode = mode;
+        windowAction.dataset.windowMode = mode;
+        windowAction.title = mode === 'poppedOut' ? 'Pop in preview' : 'Pop out preview';
+        windowAction.setAttribute('aria-label', windowAction.title);
+        api.setState({ ...api.getState(), windowMode: mode });
+      };
+      updateWindowMode(windowMode);
       const exportExcel = document.getElementById('export-excel');
+      const exactFilter = document.getElementById('exact-filter');
       let page = 0;
       let requestId = 0;
       let filterTimer;
+      let exactMatch = false;
+      const updateExactFilter = () => {
+        const label = exactMatch ? 'Exact filtering on' : 'Exact filtering off';
+        exactFilter.dataset.exactMatch = String(exactMatch);
+        exactFilter.setAttribute('aria-pressed', String(exactMatch));
+        exactFilter.title = label;
+        exactFilter.setAttribute('aria-label', label);
+      };
       const request = () => {
         requestId += 1;
         status.textContent = 'Loading…';
-        api.postMessage({ type: 'query', filter: filter.value, page, pageSize: Number(pageSize.value), requestId });
+        api.postMessage({ type: 'query', filter: filter.value, exactMatch, page, pageSize: Number(pageSize.value), requestId });
       };
       const makeCell = (tagName, value, className) => {
         const cell = document.createElement(tagName);
@@ -1548,6 +1603,15 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
       };
       window.addEventListener('message', (event) => {
         const result = event.data;
+        if (result?.type === 'windowMode') {
+          updateWindowMode(result.mode === 'poppedOut' ? 'poppedOut' : 'main');
+          windowAction.disabled = false;
+          return;
+        }
+        if (result?.type === 'windowActionError') {
+          windowAction.disabled = false;
+          return;
+        }
         if (result?.type === 'refreshError') {
           status.textContent = 'Refresh failed: ' + result.message;
           return;
@@ -1576,6 +1640,7 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
         previous.disabled = page <= 0;
         next.disabled = page + 1 >= pages;
         exportExcel.disabled = false;
+        exactFilter.disabled = false;
         filter.disabled = false;
         pageSize.disabled = false;
       });
@@ -1586,11 +1651,22 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
       });
       pageSize.addEventListener('change', () => { page = 0; request(); });
       document.getElementById('refresh-preview').addEventListener('click', () => api.postMessage({ type: 'refresh' }));
-      exportExcel.addEventListener('click', () => api.postMessage({ type: 'export', filter: filter.value }));
-      popOut.addEventListener('click', () => api.postMessage({ type: 'popout' }));
+      exportExcel.addEventListener('click', () => api.postMessage({ type: 'export', filter: filter.value, exactMatch }));
+      exactFilter.addEventListener('click', () => {
+        exactMatch = !exactMatch;
+        updateExactFilter();
+        page = 0;
+        request();
+      });
+      windowAction.addEventListener('click', () => {
+        const nextMode = windowMode === 'poppedOut' ? 'main' : 'poppedOut';
+        updateWindowMode(nextMode);
+        windowAction.disabled = true;
+        api.postMessage({ type: 'windowAction', mode: nextMode });
+      });
       previous.addEventListener('click', () => { if (page > 0) { page -= 1; request(); } });
       next.addEventListener('click', () => { page += 1; request(); });
-      api.postMessage({ type: 'ready' });
+      api.postMessage({ type: 'ready', mode: windowMode });
     })();
   </script>
 </body>
@@ -1600,7 +1676,73 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
 function renderXmlTablePreviewError(webview: vscode.Webview, fileName: string, message: string): string {
   const nonce = randomBytes(16).toString("base64");
   const contentSecurityPolicy = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${escapeHtml(fileName)} table preview</title><style>*{box-sizing:border-box}body{color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:16px}.title-bar{display:flex;align-items:center;gap:12px}.title-bar h1{font-size:18px;margin:0;overflow-wrap:anywhere}.title-actions{display:flex;gap:4px;margin-left:auto}.icon-button{display:inline-grid;place-items:center;width:30px;height:30px;padding:5px;color:var(--vscode-icon-foreground,var(--vscode-foreground));background:transparent;border:1px solid transparent;border-radius:4px;cursor:pointer}.icon-button:hover{background:var(--vscode-toolbar-hoverBackground,var(--vscode-list-hoverBackground))}.icon-button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}p{color:var(--vscode-errorForeground);white-space:pre-wrap}</style></head><body><div class="title-bar"><h1>${escapeHtml(fileName)}</h1><div class="title-actions"><button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button><button id="pop-out" class="icon-button" type="button" title="Pop out preview" aria-label="Pop out preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg></button></div></div><p id="error-message">Could not preview this XML file: ${escapeHtml(message)}</p><script nonce="${nonce}">(() => { const api = acquireVsCodeApi(); document.getElementById('refresh-preview').addEventListener('click', () => api.postMessage({ type: 'refresh' })); document.getElementById('pop-out').addEventListener('click', () => api.postMessage({ type: 'popout' })); window.addEventListener('message', event => { if (event.data?.type === 'refreshError') document.getElementById('error-message').textContent = 'Could not refresh XML preview: ' + event.data.message; }); })();</script></body></html>`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(fileName)} table preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); padding: 16px; }
+    .title-bar { display: flex; align-items: center; gap: 12px; }
+    .title-bar h1 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
+    .title-actions { display: flex; gap: 4px; margin-left: auto; }
+    .icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
+    .icon-button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+    .icon-button:disabled { opacity: .45; cursor: default; }
+    #window-action[data-window-mode="poppedOut"] .pop-in-icon { display: block; }
+    #window-action[data-window-mode="poppedOut"] .pop-out-icon { display: none; }
+    .pop-in-icon { display: none; }
+    .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    p { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="title-bar">
+    <h1>${escapeHtml(fileName)}</h1>
+    <div class="title-actions">
+      <button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button>
+      <button id="window-action" class="icon-button" data-window-mode="main" type="button" title="Pop out preview" aria-label="Pop out preview"><svg class="pop-out-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg><svg class="pop-in-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 12 12"/><path d="M12 6v6h6"/><path d="M15 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h7"/></svg></button>
+    </div>
+  </div>
+  <p id="error-message">Could not preview this XML file: ${escapeHtml(message)}</p>
+  <script nonce="${nonce}">
+    (() => {
+      const api = acquireVsCodeApi();
+      const windowAction = document.getElementById('window-action');
+      let windowMode = api.getState()?.windowMode === 'poppedOut' ? 'poppedOut' : 'main';
+      const updateWindowMode = (mode) => {
+        windowMode = mode;
+        windowAction.dataset.windowMode = mode;
+        windowAction.title = mode === 'poppedOut' ? 'Pop in preview' : 'Pop out preview';
+        windowAction.setAttribute('aria-label', windowAction.title);
+        api.setState({ ...api.getState(), windowMode: mode });
+      };
+      updateWindowMode(windowMode);
+      document.getElementById('refresh-preview').addEventListener('click', () => api.postMessage({ type: 'refresh' }));
+      windowAction.addEventListener('click', () => {
+        const nextMode = windowMode === 'poppedOut' ? 'main' : 'poppedOut';
+        updateWindowMode(nextMode);
+        windowAction.disabled = true;
+        api.postMessage({ type: 'windowAction', mode: nextMode });
+      });
+      window.addEventListener('message', event => {
+        if (event.data?.type === 'windowMode') {
+          updateWindowMode(event.data.mode === 'poppedOut' ? 'poppedOut' : 'main');
+          windowAction.disabled = false;
+        } else if (event.data?.type === 'windowActionError') {
+          windowAction.disabled = false;
+        } else if (event.data?.type === 'refreshError') {
+          document.getElementById('error-message').textContent = 'Could not refresh XML preview: ' + event.data.message;
+        }
+      });
+      api.postMessage({ type: 'ready', mode: windowMode });
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 function escapeHtml(value: string): string {
