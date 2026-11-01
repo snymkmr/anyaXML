@@ -1,7 +1,22 @@
+# Node.js and generated output
 node_modules/
+dist/
 out/
+coverage/
+.nyc_output/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# VS Code extension artifacts
+.vscode-test/
 *.vsix
+
+# Operating system files
 .DS_Store
+Thumbs.db
+
+# XML project-specific files
 *.xml
-.github/copilot-instructions.md
-test/
+test_files/
