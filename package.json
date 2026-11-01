@@ -1,12 +1,12 @@
 {
-  "name": "anyxml",
-  "displayName": "AnyXML",
-  "description": "Format and validate XML files in Visual Studio Code.",
-  "version": "0.1.4",
+  "name": "anyaxml",
+  "displayName": "AnyaXML",
+  "description": "Format, minify, and validate XML in VS Code.",
+  "version": "0.1.5",
   "publisher": "Sanyam",
   "repository": {
     "type": "git",
-    "url": "https://github.com/snymkmr/anyXML.git"
+    "url": "https://github.com/snymkmr/anyaXML.git"
   },
   "icon": "icon.png",
   "engines": {
@@ -27,15 +27,15 @@
     "commands": [
       {
         "command": "anyxml.formatXml",
-        "title": "AnyXML: Format XML Document"
+        "title": "AnyaXML: Format XML Document"
       },
       {
         "command": "anyxml.oneLineXml",
-        "title": "AnyXML: Minify XML Document"
+        "title": "AnyaXML: Minify XML Document"
       },
       {
         "command": "anyxml.validateXml",
-        "title": "AnyXML: Validate XML"
+        "title": "AnyaXML: Validate XML"
       }
     ],
     "menus": {
@@ -75,7 +75,7 @@
       ]
     },
     "configuration": {
-      "title": "AnyXML",
+      "title": "AnyaXML",
       "properties": {
         "anyxml.powershellExecutable": {
           "type": "string",

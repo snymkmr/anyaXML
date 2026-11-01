@@ -29,7 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let largeFileValidationState: LargeFileValidationState | undefined;
   let pendingLargeFileValidation: vscode.Uri | undefined;
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBar.name = "AnyXML XML Validation";
+  statusBar.name = "AnyaXML XML Validation";
 
   const updateStatusBar = (): void => {
     const document = vscode.window.activeTextEditor?.document;
@@ -528,7 +528,7 @@ function validateDocument(
     result.err.msg,
     vscode.DiagnosticSeverity.Error
   );
-  diagnostic.source = "AnyXML";
+  diagnostic.source = "AnyaXML";
   diagnostic.code = result.err.code;
   diagnostics.set(document.uri, [diagnostic]);
   validationStates.set(key, { version: document.version, diagnostic });
