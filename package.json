@@ -2,7 +2,7 @@
   "name": "anyaxml",
   "displayName": "AnyaXML",
   "description": "Format, minify, and validate XML in VS Code.",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "publisher": "Sanyam",
   "repository": {
     "type": "git",
