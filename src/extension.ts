@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const diagnosticCollectionName = "anyxml";
+const diagnosticCollectionName = "anyaxml";
 const maximumSynchronizedFileSize = 50 * 1024 * 1024;
 
 interface ValidationState {
@@ -38,7 +38,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (pendingLargeFileValidation) {
         statusBar.show();
         statusBar.command = {
-          command: "anyxml.validateXml",
+          command: "anyaxml.validateXml",
           title: "Validate XML",
           arguments: [pendingLargeFileValidation]
         };
@@ -54,7 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       statusBar.show();
       statusBar.command = {
-        command: "anyxml.validateXml",
+        command: "anyaxml.validateXml",
         title: "Validate XML",
         arguments: [largeFile.uri]
       };
@@ -73,7 +73,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     statusBar.show();
     statusBar.command = {
-      command: "anyxml.validateXml",
+      command: "anyaxml.validateXml",
       title: "Validate XML",
       arguments: [document.uri]
     };
@@ -237,82 +237,84 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("anyxml.formatXml", (resource?: vscode.Uri) =>
+    vscode.commands.registerCommand("anyaxml.formatXml", (resource?: vscode.Uri) =>
       transformXmlCommand(resource, false)
     ),
-    vscode.commands.registerCommand("anyxml.oneLineXml", (resource?: vscode.Uri) =>
+    vscode.commands.registerCommand("anyaxml.oneLineXml", (resource?: vscode.Uri) =>
       transformXmlCommand(resource, true)
     )
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("anyxml.validateXml", async (resource?: vscode.Uri) => {
-      if (resource?.scheme === "file") {
-        try {
-          const stat = await fs.stat(resource.fsPath);
-          if (stat.size > maximumSynchronizedFileSize) {
-            pendingLargeFileValidation = resource;
-            largeFileValidationState = undefined;
-            updateStatusBar();
-            try {
-              largeFileValidationState = await validateLargeXmlFile(
-                context.asAbsolutePath("validateXML.ps1"),
-                resource
-              );
-            } finally {
-              pendingLargeFileValidation = undefined;
-              updateStatusBar();
-            }
+    vscode.commands.registerCommand("anyaxml.validateXml", validateCommand)
+  );
 
-            if (largeFileValidationState.isValid) {
-              void vscode.window.showInformationMessage(`${path.basename(resource.fsPath)} is well-formed.`);
-            } else {
-              void vscode.window.showWarningMessage(
-                `${path.basename(resource.fsPath)} has an XML syntax error at line ${largeFileValidationState.line}, column ${largeFileValidationState.column}: ${largeFileValidationState.message}`
-              );
-            }
-            return;
-          }
-        } catch (error) {
-          pendingLargeFileValidation = undefined;
+  async function validateCommand(resource?: vscode.Uri): Promise<void> {
+    if (resource?.scheme === "file") {
+      try {
+        const stat = await fs.stat(resource.fsPath);
+        if (stat.size > maximumSynchronizedFileSize) {
+          pendingLargeFileValidation = resource;
+          largeFileValidationState = undefined;
           updateStatusBar();
-          void vscode.window.showErrorMessage(errorMessage(error));
+          try {
+            largeFileValidationState = await validateLargeXmlFile(
+              context.asAbsolutePath("validateXML.ps1"),
+              resource
+            );
+          } finally {
+            pendingLargeFileValidation = undefined;
+            updateStatusBar();
+          }
+
+          if (largeFileValidationState.isValid) {
+            void vscode.window.showInformationMessage(`${path.basename(resource.fsPath)} is well-formed.`);
+          } else {
+            void vscode.window.showWarningMessage(
+              `${path.basename(resource.fsPath)} has an XML syntax error at line ${largeFileValidationState.line}, column ${largeFileValidationState.column}: ${largeFileValidationState.message}`
+            );
+          }
           return;
         }
-      }
-
-      let document: vscode.TextDocument | undefined;
-      try {
-        document = await resolveXmlDocument(resource);
       } catch (error) {
+        pendingLargeFileValidation = undefined;
+        updateStatusBar();
         void vscode.window.showErrorMessage(errorMessage(error));
         return;
       }
-      if (!document) {
-        void vscode.window.showWarningMessage("Select or open an XML file before validating.");
-        return;
-      }
+    }
 
-      validateNow(document);
-      const state = validationStates.get(document.uri.toString());
-      if (!state?.diagnostic) {
-        void vscode.window.showInformationMessage("XML is well-formed.");
-      } else {
-        void vscode.window.showWarningMessage("XML validation found a syntax error. See the Problems panel and status bar for its location.");
-      }
-    })
-  );
+    let document: vscode.TextDocument | undefined;
+    try {
+      document = await resolveXmlDocument(resource);
+    } catch (error) {
+      void vscode.window.showErrorMessage(errorMessage(error));
+      return;
+    }
+    if (!document) {
+      void vscode.window.showWarningMessage("Select or open an XML file before validating.");
+      return;
+    }
+
+    validateNow(document);
+    const state = validationStates.get(document.uri.toString());
+    if (!state?.diagnostic) {
+      void vscode.window.showInformationMessage("XML is well-formed.");
+    } else {
+      void vscode.window.showWarningMessage("XML validation found a syntax error. See the Problems panel and status bar for its location.");
+    }
+  }
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument((event) => {
-      if (vscode.workspace.getConfiguration("anyxml").get<boolean>("validateOnChange", false)) {
+      if (vscode.workspace.getConfiguration("anyaxml").get<boolean>("validateOnChange", false)) {
         scheduleValidation(event.document);
       } else {
         updateStatusBar();
       }
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
-      if (vscode.workspace.getConfiguration("anyxml").get<boolean>("validateOnSave", true)) {
+      if (vscode.workspace.getConfiguration("anyaxml").get<boolean>("validateOnSave", true)) {
         scheduleValidation(document);
       } else {
         updateStatusBar();
@@ -373,7 +375,7 @@ async function formatXml(
     );
   }
 
-  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "anyxml-"));
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "anyaxml-"));
   const inputPath = path.join(temporaryDirectory, "input.xml");
   const outputPath = path.join(temporaryDirectory, minify ? "minified.xml" : "formatted.xml");
   const scriptPath = context.asAbsolutePath("formatXML.ps1");
@@ -483,7 +485,7 @@ function validateLargeXmlFile(scriptPath: string, uri: vscode.Uri): Promise<Larg
 
 function getPowerShellExecutable(): string {
   const configuredExecutable = vscode.workspace
-    .getConfiguration("anyxml")
+    .getConfiguration("anyaxml")
     .get<string>("powershellExecutable", "")
     .trim();
   return configuredExecutable || (process.platform === "win32" ? "powershell.exe" : "pwsh");
@@ -500,7 +502,7 @@ function getPowerShellSpawnOptions(): { windowsHide: true; env: NodeJS.ProcessEn
 function powerShellError(error: unknown): Error {
   const executable = getPowerShellExecutable();
   const detail = error instanceof Error ? error.message : String(error);
-  return new Error(`Could not start PowerShell (${executable}). Install PowerShell or set anyxml.powershellExecutable. ${detail}`);
+  return new Error(`Could not start PowerShell (${executable}). Install PowerShell or set anyaxml.powershellExecutable. ${detail}`);
 }
 
 function validateDocument(

@@ -18,57 +18,57 @@
   ],
   "activationEvents": [
     "onLanguage:xml",
-    "onCommand:anyxml.formatXml",
-    "onCommand:anyxml.oneLineXml",
-    "onCommand:anyxml.validateXml"
+    "onCommand:anyaxml.formatXml",
+    "onCommand:anyaxml.oneLineXml",
+    "onCommand:anyaxml.validateXml"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "anyxml.formatXml",
+        "command": "anyaxml.formatXml",
         "title": "AnyaXML: Format XML Document"
       },
       {
-        "command": "anyxml.oneLineXml",
+        "command": "anyaxml.oneLineXml",
         "title": "AnyaXML: Minify XML Document"
       },
       {
-        "command": "anyxml.validateXml",
+        "command": "anyaxml.validateXml",
         "title": "AnyaXML: Validate XML"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "anyxml.formatXml",
+          "command": "anyaxml.formatXml",
           "when": "editorLangId == xml || resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "1_modification@1"
         },
         {
-          "command": "anyxml.validateXml",
+          "command": "anyaxml.validateXml",
           "when": "editorLangId == xml || resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "1_modification@3"
         },
         {
-          "command": "anyxml.oneLineXml",
+          "command": "anyaxml.oneLineXml",
           "when": "editorLangId == xml || resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "1_modification@2"
         }
       ],
       "explorer/context": [
         {
-          "command": "anyxml.formatXml",
+          "command": "anyaxml.formatXml",
           "when": "resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "2_workspace@1"
         },
         {
-          "command": "anyxml.validateXml",
+          "command": "anyaxml.validateXml",
           "when": "resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "2_workspace@3"
         },
         {
-          "command": "anyxml.oneLineXml",
+          "command": "anyaxml.oneLineXml",
           "when": "resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "2_workspace@2"
         }
@@ -77,17 +77,17 @@
     "configuration": {
       "title": "AnyaXML",
       "properties": {
-        "anyxml.powershellExecutable": {
+        "anyaxml.powershellExecutable": {
           "type": "string",
           "default": "",
           "description": "PowerShell executable used for formatting and minifying XML documents and for validating files over 50 MiB. Leave empty to use pwsh (or powershell.exe on Windows)."
         },
-        "anyxml.validateOnChange": {
+        "anyaxml.validateOnChange": {
           "type": "boolean",
           "default": true,
           "description": "Validate XML after edits. Validation is debounced; disable this for very large documents if it slows editing."
         },
-        "anyxml.validateOnSave": {
+        "anyaxml.validateOnSave": {
           "type": "boolean",
           "default": true,
           "description": "Validate XML when a document is saved."
