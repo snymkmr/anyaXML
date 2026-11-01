@@ -13,7 +13,7 @@ For regular XML files, either right-click in the editor or right-click the file 
 - **AnyaXML: Format XML Document** to format the document. Large file conversions use streaming mode.
 - **AnyaXML: Minify XML Document** to write text and whitespace nodes on one line while preserving parsed element values. Source line breaks are written as character references (for example, `&#xA;`) so they remain part of the XML content. Without a DTD or schema, XML does not reliably distinguish meaningful whitespace from formatting whitespace. For a regular open document, this replaces its contents; use Undo to reverse it.
 - **AnyaXML: Validate XML** to check that the document is well-formed. The first syntax error appears in the Problems panel.
-- **AnyaXML: Preview XML as Table** to open a side-by-side table preview. AnyaXML detects a repeated element group for rows, flattens nested fields into columns, and includes attributes. Use the filter and page controls to browse the rows. Files over 50 MiB are read directly from disk, so they do not need to be synchronized with the editor.
+- **AnyaXML: Preview XML as Table** to open a side-by-side table preview. AnyaXML detects a repeated element group for rows, flattens nested fields into columns, and includes attributes. Use the filter and page controls to browse the rows. The green **Export** button saves all rows matching the current filter as a real Excel workbook (`.xlsx`), not only the visible page. Values are stored as text so Excel keeps identifiers, dates, and formula-like strings as shown. The workbook contains the flattened preview table; the XML source is unchanged. Files over 50 MiB are read directly from disk, so they do not need to be synchronized with the editor.
 
 ### Large files
 

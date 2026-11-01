@@ -1,12 +1,15 @@
 import * as vscode from "vscode";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { randomBytes } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { TextDecoder } from "node:util";
+import { createDeflateRaw } from "node:zlib";
 import { parser as createSaxParser } from "sax";
 
 const diagnosticCollectionName = "anyaxml";
@@ -420,6 +423,17 @@ export function activate(context: vscode.ExtensionContext): void {
             void panel.webview.postMessage({ type: "refreshError", message: errorMessage(error) });
           }
         }
+        return;
+      }
+      if (message.type === "export") {
+        if (!preview) {
+          void vscode.window.showWarningMessage("The XML preview is still loading.");
+          return;
+        }
+        const sourceUri = largeFilePath ? vscode.Uri.file(largeFilePath) : document?.uri;
+        const filter = typeof message.filter === "string" ? message.filter : "";
+        void exportXmlPreviewForExcel(preview, sourceUri, fileName, filter)
+          .catch((error: unknown) => vscode.window.showErrorMessage(`Could not export Excel workbook: ${errorMessage(error)}`));
         return;
       }
       if (message.type === "ready") {
@@ -1158,12 +1172,7 @@ function queryXmlTable(
   requestId: number
 ): XmlTablePage {
   const pageSize = [25, 50, 100, 200].includes(requestedPageSize) ? requestedPageSize : 50;
-  const normalizedFilter = filter.trim().toLocaleLowerCase();
-  const filteredRows = normalizedFilter
-    ? preview.rows.filter((row) => preview.columns.some((column) =>
-      (row[column] ?? "").toLocaleLowerCase().includes(normalizedFilter)
-    ))
-    : preview.rows;
+  const filteredRows = getFilteredXmlTableRows(preview, filter);
   const pageCount = Math.ceil(filteredRows.length / pageSize);
   const page = Math.min(Math.max(0, Math.floor(requestedPage)), Math.max(0, pageCount - 1));
   return {
@@ -1176,6 +1185,281 @@ function queryXmlTable(
     totalRows: filteredRows.length,
     requestId
   };
+}
+
+function getFilteredXmlTableRows(
+  preview: XmlTablePreview,
+  filter: string
+): Array<Record<string, string>> {
+  const normalizedFilter = filter.trim().toLocaleLowerCase();
+  return normalizedFilter
+    ? preview.rows.filter((row) => preview.columns.some((column) =>
+      (row[column] ?? "").toLocaleLowerCase().includes(normalizedFilter)
+    ))
+    : preview.rows;
+}
+
+const excelMaxRows = 1_048_576;
+const excelMaxColumns = 16_384;
+const zip32MaxValue = 0xffff_ffff;
+const zipCrc32Table = Uint32Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+
+interface ExcelZipEntry {
+  fileName: string;
+  method: number;
+  flags: number;
+  checksum: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localOffset: number;
+}
+
+function excelColumnName(columnNumber: number): string {
+  let number = columnNumber;
+  let name = "";
+  while (number > 0) {
+    const remainder = (number - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    number = Math.floor((number - 1) / 26);
+  }
+  return name;
+}
+
+function escapeExcelText(value: string): string {
+  const text = String(value ?? "").replace(/_x([0-9a-f]{4})_/gi, "_x005F_x$1_");
+  let escaped = "";
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code === 0x0d || code <= 0x08 || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || (code >= 0xd800 && code <= 0xdfff) || code === 0xfffe || code === 0xffff) {
+      escaped += `_x${code.toString(16).toUpperCase().padStart(4, "0")}_`;
+    } else if (character === "&") escaped += "&amp;";
+    else if (character === "<") escaped += "&lt;";
+    else if (character === ">") escaped += "&gt;";
+    else if (character === '"') escaped += "&quot;";
+    else if (character === "'") escaped += "&apos;";
+    else escaped += character;
+  }
+  return escaped;
+}
+
+function* excelWorksheetRowXml(row: string[], rowNumber: number): Generator<string> {
+  yield `<row r="${rowNumber}">`;
+  for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+    const cellReference = `${excelColumnName(columnIndex + 1)}${rowNumber}`;
+    yield `<c r="${cellReference}" t="inlineStr"><is><t xml:space="preserve">${escapeExcelText(row[columnIndex])}</t></is></c>`;
+  }
+  yield "</row>";
+}
+
+function* excelWorksheetXml(headers: string[], rows: string[][]): Generator<string> {
+  yield '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetData>';
+  yield* excelWorksheetRowXml(headers, 1);
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    yield* excelWorksheetRowXml(rows[rowIndex], rowIndex + 2);
+  }
+  yield "</sheetData>";
+  if (rows.length > 0) yield `<autoFilter ref="A1:${excelColumnName(headers.length)}${rows.length + 1}"/>`;
+  yield "</worksheet>";
+}
+
+function calculateZipCrc32(buffer: Buffer): number {
+  let checksum = 0xffff_ffff;
+  for (const byte of buffer) checksum = zipCrc32Table[(checksum ^ byte) & 0xff] ^ (checksum >>> 8);
+  return (checksum ^ 0xffff_ffff) >>> 0;
+}
+
+function createZipLocalHeader(
+  fileName: string,
+  method: number,
+  flags: number,
+  checksum: number,
+  compressedSize: number,
+  uncompressedSize: number
+): Buffer {
+  const name = Buffer.from(fileName, "utf8");
+  const header = Buffer.alloc(30 + name.length);
+  header.writeUInt32LE(0x04034b50, 0);
+  header.writeUInt16LE(20, 4);
+  header.writeUInt16LE(flags, 6);
+  header.writeUInt16LE(method, 8);
+  header.writeUInt16LE(0, 10);
+  header.writeUInt16LE(0x0021, 12);
+  header.writeUInt32LE(checksum, 14);
+  header.writeUInt32LE(compressedSize, 18);
+  header.writeUInt32LE(uncompressedSize, 22);
+  header.writeUInt16LE(name.length, 26);
+  header.writeUInt16LE(0, 28);
+  name.copy(header, 30);
+  return header;
+}
+
+function createZipCentralHeader(entry: ExcelZipEntry): Buffer {
+  const name = Buffer.from(entry.fileName, "utf8");
+  const header = Buffer.alloc(46 + name.length);
+  header.writeUInt32LE(0x02014b50, 0);
+  header.writeUInt16LE(20, 4);
+  header.writeUInt16LE(20, 6);
+  header.writeUInt16LE(entry.flags, 8);
+  header.writeUInt16LE(entry.method, 10);
+  header.writeUInt16LE(0, 12);
+  header.writeUInt16LE(0x0021, 14);
+  header.writeUInt32LE(entry.checksum, 16);
+  header.writeUInt32LE(entry.compressedSize, 20);
+  header.writeUInt32LE(entry.uncompressedSize, 24);
+  header.writeUInt16LE(name.length, 28);
+  header.writeUInt16LE(0, 30);
+  header.writeUInt16LE(0, 32);
+  header.writeUInt16LE(0, 34);
+  header.writeUInt16LE(0, 36);
+  header.writeUInt32LE(0, 38);
+  header.writeUInt32LE(entry.localOffset, 42);
+  name.copy(header, 46);
+  return header;
+}
+
+function createExcelWorkbookArchive(headers: string[], rows: string[][]): { headers: string[]; rows: string[][] } {
+  if (headers.length === 0) throw new Error("There are no columns to export.");
+  if (headers.length > excelMaxColumns) throw new Error(`Excel supports at most ${excelMaxColumns.toLocaleString()} columns per worksheet.`);
+  if (rows.length + 1 > excelMaxRows) throw new Error(`Excel supports at most ${(excelMaxRows - 1).toLocaleString()} data rows plus a header row per worksheet.`);
+  const checkCellLength = (value: string): void => {
+    if (String(value ?? "").length > 32_767) throw new Error("Excel supports at most 32,767 characters in a cell. Shorten the data and try again.");
+  };
+  headers.forEach(checkCellLength);
+  rows.forEach((row) => row.forEach(checkCellLength));
+
+  return { headers, rows };
+}
+
+async function* excelWorkbookZipChunks(workbook: { headers: string[]; rows: string[][] }): AsyncGenerator<Buffer> {
+  const workbookParts: Array<[string, string]> = [
+    ["[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'],
+    ["_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+    ["xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>'],
+    ["xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'],
+    ["xl/styles.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="0"/><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/></styleSheet>']
+  ];
+  const centralEntries: ExcelZipEntry[] = [];
+  let archiveOffset = 0;
+  for (const [fileName, content] of workbookParts) {
+    const data = Buffer.from(content, "utf8");
+    const checksum = calculateZipCrc32(data);
+    const header = createZipLocalHeader(fileName, 0, 0x0800, checksum, data.length, data.length);
+    const localOffset = archiveOffset;
+    yield header;
+    archiveOffset += header.length;
+    yield data;
+    archiveOffset += data.length;
+    centralEntries.push({ fileName, method: 0, flags: 0x0800, checksum, compressedSize: data.length, uncompressedSize: data.length, localOffset });
+  }
+
+  const sheetFileName = "xl/worksheets/sheet1.xml";
+  const sheetFlags = 0x0808;
+  const sheetLocalOffset = archiveOffset;
+  const sheetHeader = createZipLocalHeader(sheetFileName, 8, sheetFlags, 0, 0, 0);
+  yield sheetHeader;
+  archiveOffset += sheetHeader.length;
+
+  let checksumState = 0xffff_ffff;
+  let uncompressedSize = 0;
+  const checksumStream = new Transform({
+    transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void): void {
+      uncompressedSize += chunk.length;
+      for (const byte of chunk) checksumState = zipCrc32Table[(checksumState ^ byte) & 0xff] ^ (checksumState >>> 8);
+      callback(null, chunk);
+    }
+  });
+  const deflater = createDeflateRaw();
+  const compression = pipeline(Readable.from(excelWorksheetXml(workbook.headers, workbook.rows)), checksumStream, deflater);
+  let compressedSize = 0;
+  for await (const chunk of deflater) {
+    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    compressedSize += data.length;
+    archiveOffset += data.length;
+    yield data;
+  }
+  await compression;
+  const sheetChecksum = (checksumState ^ 0xffff_ffff) >>> 0;
+  if (compressedSize > zip32MaxValue || uncompressedSize > zip32MaxValue || archiveOffset > zip32MaxValue) {
+    throw new Error("The exported workbook is too large for this Excel file format.");
+  }
+  const descriptor = Buffer.alloc(16);
+  descriptor.writeUInt32LE(0x08074b50, 0);
+  descriptor.writeUInt32LE(sheetChecksum, 4);
+  descriptor.writeUInt32LE(compressedSize, 8);
+  descriptor.writeUInt32LE(uncompressedSize, 12);
+  yield descriptor;
+  archiveOffset += descriptor.length;
+  centralEntries.push({ fileName: sheetFileName, method: 8, flags: sheetFlags, checksum: sheetChecksum, compressedSize, uncompressedSize, localOffset: sheetLocalOffset });
+
+  const centralOffset = archiveOffset;
+  for (const entry of centralEntries) {
+    const centralHeader = createZipCentralHeader(entry);
+    yield centralHeader;
+    archiveOffset += centralHeader.length;
+  }
+  const centralSize = archiveOffset - centralOffset;
+  if (archiveOffset > zip32MaxValue || centralSize > zip32MaxValue) throw new Error("The exported workbook is too large for this Excel file format.");
+  const endRecord = Buffer.alloc(22);
+  endRecord.writeUInt32LE(0x06054b50, 0);
+  endRecord.writeUInt16LE(0, 4);
+  endRecord.writeUInt16LE(0, 6);
+  endRecord.writeUInt16LE(centralEntries.length, 8);
+  endRecord.writeUInt16LE(centralEntries.length, 10);
+  endRecord.writeUInt32LE(centralSize, 12);
+  endRecord.writeUInt32LE(centralOffset, 16);
+  endRecord.writeUInt16LE(0, 20);
+  yield endRecord;
+}
+
+async function writeExcelArchive(target: vscode.Uri, workbook: { headers: string[]; rows: string[][] }): Promise<void> {
+  const zipStream = Readable.from(excelWorkbookZipChunks(workbook));
+  if (target.scheme !== "file") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of zipStream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    await vscode.workspace.fs.writeFile(target, Buffer.concat(chunks));
+    return;
+  }
+
+  const temporaryPath = path.join(path.dirname(target.fsPath), `.${path.basename(target.fsPath)}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    await pipeline(zipStream, createWriteStream(temporaryPath, { flags: "wx" }));
+    await fs.rename(temporaryPath, target.fsPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function exportXmlPreviewForExcel(
+  preview: XmlTablePreview,
+  sourceUri: vscode.Uri | undefined,
+  fallbackName: string,
+  filter: string
+): Promise<void> {
+  const rows = getFilteredXmlTableRows(preview, filter).map((row) =>
+    preview.columns.map((column) => row[column] ?? "")
+  );
+  const sourcePath = sourceUri?.scheme === "file" ? sourceUri.fsPath : "";
+  const sourceName = sourcePath
+    ? path.basename(sourcePath, path.extname(sourcePath))
+    : path.basename(fallbackName, path.extname(fallbackName)) || "data";
+  const defaultUri = sourcePath
+    ? vscode.Uri.file(path.join(path.dirname(sourcePath), `${sourceName}_export.xlsx`))
+    : undefined;
+  const target = await vscode.window.showSaveDialog({
+    defaultUri,
+    saveLabel: "Export to Excel",
+    filters: { "Excel workbooks": ["xlsx"] }
+  });
+  if (!target) {
+    return;
+  }
+  await writeExcelArchive(target, createExcelWorkbookArchive(preview.columns, rows));
+  void vscode.window.showInformationMessage(`Exported ${rows.length.toLocaleString()} rows to an Excel workbook.`);
 }
 
 function renderXmlTablePreview(webview: vscode.Webview, fileName: string): string {
@@ -1198,6 +1482,10 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
     .icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
     .icon-button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
     .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    .title-actions .excel-export-button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 4px 9px; color: #fff; background: #217346; border: 1px solid #185c37; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .title-actions .excel-export-button:hover:not(:disabled) { background: #185c37; }
+    .title-actions .excel-export-button:disabled { cursor: default; opacity: .5; }
+    .excel-mark { display: inline-grid; place-items: center; width: 17px; height: 17px; border: 1px solid rgba(255,255,255,.8); border-radius: 2px; font-size: 11px; line-height: 1; font-weight: 700; }
     .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
     .pagination { justify-content: flex-end; margin-top: 10px; }
     .pagination button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; border: 1px solid transparent; border-radius: 4px; }
@@ -1218,7 +1506,7 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
   </style>
 </head>
 <body>
-  <div class="title-bar"><h1>${escapeHtml(fileName)}</h1><div class="title-actions"><button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button><button id="pop-out" class="icon-button" type="button" title="Pop out preview" aria-label="Pop out preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg></button></div></div>
+  <div class="title-bar"><h1>${escapeHtml(fileName)}</h1><div class="title-actions"><button id="export-excel" class="excel-export-button" type="button" title="Export all filtered rows as an Excel workbook (.xlsx)" aria-label="Export all filtered rows as an Excel workbook (.xlsx)" disabled><span class="excel-mark" aria-hidden="true">X</span><span>Export</span></button><button id="refresh-preview" class="icon-button" type="button" title="Refresh preview" aria-label="Refresh preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8 8 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/></svg></button><button id="pop-out" class="icon-button" type="button" title="Pop out preview" aria-label="Pop out preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg></button></div></div>
   <div class="controls">
     <input id="filter" type="search" placeholder="Filter rows…" aria-label="Filter rows" disabled>
     <label for="page-size">Rows per page</label>
@@ -1243,6 +1531,7 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
       const pageInfo = document.getElementById('page-info');
       const element = document.getElementById('element');
       const popOut = document.getElementById('pop-out');
+      const exportExcel = document.getElementById('export-excel');
       let page = 0;
       let requestId = 0;
       let filterTimer;
@@ -1286,6 +1575,7 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
         status.textContent = result.totalRows === 0 ? 'No matching rows.' : '';
         previous.disabled = page <= 0;
         next.disabled = page + 1 >= pages;
+        exportExcel.disabled = false;
         filter.disabled = false;
         pageSize.disabled = false;
       });
@@ -1296,6 +1586,7 @@ function renderXmlTablePreview(webview: vscode.Webview, fileName: string): strin
       });
       pageSize.addEventListener('change', () => { page = 0; request(); });
       document.getElementById('refresh-preview').addEventListener('click', () => api.postMessage({ type: 'refresh' }));
+      exportExcel.addEventListener('click', () => api.postMessage({ type: 'export', filter: filter.value }));
       popOut.addEventListener('click', () => api.postMessage({ type: 'popout' }));
       previous.addEventListener('click', () => { if (page > 0) { page -= 1; request(); } });
       next.addEventListener('click', () => { page += 1; request(); });
