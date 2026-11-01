@@ -34,3 +34,7 @@ The status bar shows green when the active XML file is valid and red when it has
 To check another file, click the status bar or run **AnyaXML: Validate XML** from the Command Palette or a context menu.
 
 Validation checks XML syntax and well-formedness. It does not validate an XML Schema (XSD).
+
+## Privacy
+
+See the [Privacy Policy](https://sanyam.dev/privacy) for privacy information about my projects.
