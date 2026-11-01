@@ -570,12 +570,16 @@ export function deactivate(): void {
   // VS Code disposes subscriptions registered during activation.
 }
 
+export function validateXml(xml: string): ReturnType<typeof XMLValidator.validate> {
+  return XMLValidator.validate(xml);
+}
+
 async function formatXml(
   xml: string,
   context: vscode.ExtensionContext,
   minify = false
 ): Promise<string> {
-  const validation = XMLValidator.validate(xml);
+  const validation = validateXml(xml);
   if (validation !== true) {
     throw new Error(
       `Cannot format malformed XML. Syntax error at line ${validation.err.line}, column ${validation.err.col}: ${validation.err.msg}`
@@ -720,7 +724,7 @@ function validateDocument(
     return;
   }
 
-  const result = XMLValidator.validate(document.getText());
+  const result = validateXml(document.getText());
   const key = document.uri.toString();
   if (result === true) {
     diagnostics.delete(document.uri);

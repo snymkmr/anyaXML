@@ -111,6 +111,7 @@
     }
   },
   "scripts": {
+    "test": "npm run compile && node --test",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
