@@ -1,8 +1,8 @@
 {
   "name": "anyaxml",
   "displayName": "AnyaXML",
-  "description": "Format, minify, and validate XML in VS Code.",
-  "version": "0.2.1",
+  "description": "Format, minify, validate, and preview XML as tables in VS Code.",
+  "version": "0.2.2",
   "publisher": "Sanyam",
   "repository": {
     "type": "git",
@@ -20,7 +20,8 @@
     "onLanguage:xml",
     "onCommand:anyaxml.formatXml",
     "onCommand:anyaxml.oneLineXml",
-    "onCommand:anyaxml.validateXml"
+    "onCommand:anyaxml.validateXml",
+    "onCommand:anyaxml.previewXmlAsTable"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -36,6 +37,10 @@
       {
         "command": "anyaxml.validateXml",
         "title": "AnyaXML: Validate XML"
+      },
+      {
+        "command": "anyaxml.previewXmlAsTable",
+        "title": "AnyaXML: Preview XML as Table"
       }
     ],
     "menus": {
@@ -54,6 +59,11 @@
           "command": "anyaxml.oneLineXml",
           "when": "editorLangId == xml || resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "1_modification@2"
+        },
+        {
+          "command": "anyaxml.previewXmlAsTable",
+          "when": "editorLangId == xml || resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
+          "group": "1_modification@4"
         }
       ],
       "explorer/context": [
@@ -71,6 +81,11 @@
           "command": "anyaxml.oneLineXml",
           "when": "resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
           "group": "2_workspace@2"
+        },
+        {
+          "command": "anyaxml.previewXmlAsTable",
+          "when": "resourceExtname == .xml || resourceExtname == .xsd || resourceExtname == .xsl || resourceExtname == .xslt",
+          "group": "2_workspace@4"
         }
       ]
     },
@@ -96,12 +111,14 @@
     }
   },
   "scripts": {
+    "test": "npm run compile && node --test",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
-    "fast-xml-parser": "^5.2.5"
+    "fast-xml-parser": "^5.2.5",
+    "sax": "^1.6.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
