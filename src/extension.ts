@@ -52,6 +52,7 @@ interface XmlPathStat {
   depth: number;
   childCount: number;
   attributeCount: number;
+  repeatedChildPaths: Set<string>;
 }
 
 interface XmlStreamFrame {
@@ -59,6 +60,8 @@ interface XmlStreamFrame {
   path: string;
   childCount: number;
   attributeCount: number;
+  childCountsByName: Map<string, number>;
+  repeatedChildPaths: Set<string>;
 }
 
 interface XmlStreamEvents {
@@ -847,8 +850,9 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
       if (value.length > 0 && value.every(isRecord)) {
         const rows = value as Array<Record<string, unknown>>;
         const columns = new Set<string>();
+        const repeatedPaths = collectRepeatedXmlPaths(rows);
         for (const row of rows) {
-          for (const column of Object.keys(flattenXmlRecord(row))) {
+          for (const column of Object.keys(flattenXmlRecord(row, repeatedPaths))) {
             columns.add(column);
           }
         }
@@ -881,7 +885,8 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
       right.depth - left.depth
     );
     const selected = objectCandidates[0];
-    const rows = selected.rows.map((row) => flattenXmlRecord(row));
+    const repeatedPaths = collectRepeatedXmlPaths(selected.rows);
+    const rows = selected.rows.map((row) => flattenXmlRecord(row, repeatedPaths));
     return {
       columns: collectColumns(rows),
       rows,
@@ -905,7 +910,9 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   const rootName = isRecord(parsedXml) ? Object.keys(parsedXml)[0] : undefined;
   const rootValue = rootName ? (parsedXml as Record<string, unknown>)[rootName] : parsedXml;
   const rootNode = Array.isArray(rootValue) ? rootValue[0] : rootValue;
-  const row = isRecord(rootNode) ? flattenXmlRecord(rootNode) : { Value: formatXmlValue(rootNode) };
+  const row = isRecord(rootNode)
+    ? flattenXmlRecord(rootNode, collectRepeatedXmlPaths([rootNode]))
+    : { Value: formatXmlValue(rootNode) };
   const rows = [row];
   return {
     columns: collectColumns(rows),
@@ -922,7 +929,9 @@ export async function buildXmlTablePreviewFromFile(filePath: string): Promise<Xm
   await streamXmlFile(filePath, {
     open: (tag) => {
       if (scanStack.length > 0) {
-        scanStack[scanStack.length - 1].childCount += 1;
+        const parent = scanStack[scanStack.length - 1];
+        parent.childCount += 1;
+        parent.childCountsByName.set(tag.name, (parent.childCountsByName.get(tag.name) ?? 0) + 1);
       }
       const pathParts = scanStack.map((frame) => frame.name);
       pathParts.push(tag.name);
@@ -931,7 +940,8 @@ export async function buildXmlTablePreviewFromFile(filePath: string): Promise<Xm
         count: 0,
         depth: pathParts.length,
         childCount: 0,
-        attributeCount: 0
+        attributeCount: 0,
+        repeatedChildPaths: new Set<string>()
       };
       stat.count += 1;
       stat.attributeCount += Object.keys(tag.attributes).length;
@@ -940,7 +950,9 @@ export async function buildXmlTablePreviewFromFile(filePath: string): Promise<Xm
         name: tag.name,
         path: elementPath,
         childCount: 0,
-        attributeCount: Object.keys(tag.attributes).length
+        attributeCount: Object.keys(tag.attributes).length,
+        childCountsByName: new Map<string, number>(),
+        repeatedChildPaths: new Set<string>()
       });
     },
     close: () => {
@@ -948,16 +960,29 @@ export async function buildXmlTablePreviewFromFile(filePath: string): Promise<Xm
       if (!frame) {
         return;
       }
+      for (const [childName, count] of frame.childCountsByName) {
+        if (count > 1) frame.repeatedChildPaths.add(childName);
+      }
       const stat = statistics.get(frame.path);
       if (stat) {
         stat.childCount += frame.childCount;
+        for (const repeatedPath of frame.repeatedChildPaths) {
+          stat.repeatedChildPaths.add(repeatedPath);
+        }
+      }
+      const parent = scanStack[scanStack.length - 1];
+      if (parent) {
+        for (const repeatedPath of frame.repeatedChildPaths) {
+          parent.repeatedChildPaths.add(`${frame.name}.${repeatedPath}`);
+        }
       }
     },
     text: () => undefined
   });
 
   const targetPath = selectXmlTablePath(statistics);
-  const rows = await collectXmlTableRows(filePath, targetPath);
+  const repeatedPaths = statistics.get(targetPath)?.repeatedChildPaths ?? new Set<string>();
+  const rows = await collectXmlTableRows(filePath, targetPath, repeatedPaths);
   const columns = collectColumns(rows);
   return { columns, rows, sourcePath: targetPath, totalRows: rows.length };
 }
@@ -993,7 +1018,11 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
   return singleRecord[0]?.[0] ?? candidates[0]?.[0] ?? "XML";
 }
 
-async function collectXmlTableRows(filePath: string, targetPath: string): Promise<Array<Record<string, string>>> {
+async function collectXmlTableRows(
+  filePath: string,
+  targetPath: string,
+  repeatedPaths: Set<string>
+): Promise<Array<Record<string, string>>> {
   const pathStack: string[] = [];
   const captureStack: XmlPreviewNode[] = [];
   const rows: Array<Record<string, string>> = [];
@@ -1019,7 +1048,7 @@ async function collectXmlTableRows(filePath: string, targetPath: string): Promis
       }
       const node = captureStack.pop()!;
       if (captureStack.length === 0) {
-        rows.push(flattenXmlPreviewNode(node));
+        rows.push(flattenXmlPreviewNode(node, repeatedPaths));
       }
     },
     text: (text) => {
@@ -1037,23 +1066,9 @@ function createXmlPreviewNode(name: string, attributes: Record<string, string>):
   return { name, attributes, text: [], children: new Map<string, XmlPreviewNode[]>() };
 }
 
-function containsNestedRepeatedRecordGroup(node: XmlPreviewNode): boolean {
-  for (const children of node.children.values()) {
-    if (children.length > 1 && children.some((child) =>
-      child.children.size > 0 || Object.keys(child.attributes).length > 0
-    )) {
-      return true;
-    }
-    if (children.some(containsNestedRepeatedRecordGroup)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function flattenXmlPreviewNode(node: XmlPreviewNode): Record<string, string> {
+function flattenXmlPreviewNode(node: XmlPreviewNode, repeatedPaths: Set<string>): Record<string, string> {
   const flattened = Object.create(null) as Record<string, string>;
-  const flatten = (current: XmlPreviewNode, prefix: string): void => {
+  const flatten = (current: XmlPreviewNode, prefix: string, canonicalPrefix: string): void => {
     for (const [name, value] of Object.entries(current.attributes)) {
       flattened[prefix ? `${prefix}.@${name}` : `@${name}`] = value;
     }
@@ -1066,20 +1081,21 @@ function flattenXmlPreviewNode(node: XmlPreviewNode): Record<string, string> {
 
     for (const [childName, children] of current.children) {
       const columnPath = prefix ? `${prefix}.${childName}` : childName;
+      const canonicalPath = canonicalPrefix ? `${canonicalPrefix}.${childName}` : childName;
       const simpleValues = children.every((child) =>
         child.children.size === 0 && Object.keys(child.attributes).length === 0
       );
       if (simpleValues) {
         flattened[columnPath] = children.map((child) => child.text.join("").trim()).join(", ");
-      } else if (children.length === 1 && containsNestedRepeatedRecordGroup(children[0])) {
-        flatten(children[0], columnPath);
+      } else if (children.length === 1 && !repeatedPaths.has(canonicalPath)) {
+        flatten(children[0], columnPath, canonicalPath);
       } else {
-        children.forEach((child, index) => flatten(child, `${columnPath}[${index + 1}]`));
+        children.forEach((child, index) => flatten(child, `${columnPath}[${index + 1}]`, canonicalPath));
       }
     }
   };
 
-  flatten(node, "");
+  flatten(node, "", "");
   return flattened;
 }
 
@@ -1143,15 +1159,18 @@ function createXmlTextDecoder(initialBytes: Buffer): TextDecoder {
   return new TextDecoder(encoding);
 }
 
-function flattenXmlRecord(record: Record<string, unknown>): Record<string, string> {
+function flattenXmlRecord(
+  record: Record<string, unknown>,
+  repeatedPaths: Set<string> = new Set<string>()
+): Record<string, string> {
   const flattened = Object.create(null) as Record<string, string>;
-  const addValue = (value: unknown, columnPath: string): void => {
+  const addValue = (value: unknown, columnPath: string, canonicalPath = columnPath): void => {
     if (Array.isArray(value)) {
       if (value.length > 0 && value.every(isRecord)) {
-        if (value.length === 1 && containsNestedRecordArray(value[0])) {
-          addValue(value[0], columnPath);
+        if (value.length === 1 && !repeatedPaths.has(canonicalPath)) {
+          addValue(value[0], columnPath, canonicalPath);
         } else {
-          value.forEach((item, index) => addValue(item, `${columnPath}[${index + 1}]`));
+          value.forEach((item, index) => addValue(item, `${columnPath}[${index + 1}]`, canonicalPath));
         }
       } else {
         flattened[columnPath] = value.map(formatXmlValue).join(", ");
@@ -1166,7 +1185,7 @@ function flattenXmlRecord(record: Record<string, unknown>): Record<string, strin
         return;
       }
       for (const [key, child] of entries) {
-        addValue(child, columnPath ? `${columnPath}.${key}` : key);
+        addValue(child, columnPath ? `${columnPath}.${key}` : key, canonicalPath ? `${canonicalPath}.${key}` : key);
       }
       return;
     }
@@ -1190,10 +1209,26 @@ function collectColumns(rows: Array<Record<string, string>>): string[] {
   return [...columns];
 }
 
-function containsNestedRecordArray(record: Record<string, unknown>): boolean {
-  return Object.values(record).some((value) =>
-    Array.isArray(value) && value.length > 0 && value.every(isRecord)
-  );
+function collectRepeatedXmlPaths(records: Array<Record<string, unknown>>): Set<string> {
+  const repeatedPaths = new Set<string>();
+  const visit = (record: Record<string, unknown>, prefix: string): void => {
+    for (const [name, value] of Object.entries(record)) {
+      const currentPath = prefix ? `${prefix}.${name}` : name;
+      if (Array.isArray(value)) {
+        if (value.length > 1 && value.every(isRecord)) {
+          repeatedPaths.add(currentPath);
+        }
+        for (const item of value) {
+          if (isRecord(item)) visit(item, currentPath);
+        }
+      } else if (isRecord(value)) {
+        visit(value, currentPath);
+      }
+    }
+  };
+
+  for (const record of records) visit(record, "");
+  return repeatedPaths;
 }
 
 function formatXmlValue(value: unknown): string {

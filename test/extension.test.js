@@ -62,9 +62,10 @@ test('flattens repeated beneficiaries into one-based columns for 10,245 transact
   const singleBeneficiary = buildXmlTablePreview(parser.parse(
     '<Transactions><Transaction sequence="1"><Beneficiaries><Beneficiary><ID>BEN00000001</ID><Name>FIRST</Name><Address>SAMPLE CITY US</Address></Beneficiary></Beneficiaries></Transaction></Transactions>'
   ));
-  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary[1].ID'], 'BEN00000001');
-  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary[1].Name'], 'FIRST');
-  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary[1].Address'], 'SAMPLE CITY US');
+  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary.ID'], 'BEN00000001');
+  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary.Name'], 'FIRST');
+  assert.equal(singleBeneficiary.rows[0]['Beneficiaries.Beneficiary.Address'], 'SAMPLE CITY US');
+  assert.ok(singleBeneficiary.columns.every((column) => !column.includes('Beneficiary[1]')));
 
   const directory = await mkdtemp(path.join(os.tmpdir(), 'anyaxml-'));
   const filePath = path.join(directory, 'transactions.xml');
@@ -75,6 +76,71 @@ test('flattens repeated beneficiaries into one-based columns for 10,245 transact
     assert.equal(streamedPreview.totalRows, transactionCount);
     assert.deepEqual([...streamedPreview.columns].sort(), [...preview.columns].sort());
     assert.deepEqual(streamedPreview.rows[0], preview.rows[0]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('indexes only repeated nested elements and keeps columns aligned across rows', async () => {
+  const xml = '<Transactions>'
+    + '<Transaction sequence="1"><State><Code>OPEN</Code></State><Beneficiaries><Beneficiary><ID>BEN-A</ID></Beneficiary><Beneficiary><ID>BEN-B</ID></Beneficiary></Beneficiaries></Transaction>'
+    + '<Transaction sequence="2"><State><Code>CLOSED</Code></State><Beneficiaries><Beneficiary><ID>BEN-C</ID></Beneficiary></Beneficiaries></Transaction>'
+    + '</Transactions>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  const preview = buildXmlTablePreview(parser.parse(xml));
+
+  assert.equal(preview.rows[0]['State.Code'], 'OPEN');
+  assert.equal(preview.rows[0]['State[1].Code'], undefined);
+  assert.equal(preview.rows[0]['Beneficiaries.Beneficiary[1].ID'], 'BEN-A');
+  assert.equal(preview.rows[0]['Beneficiaries.Beneficiary[2].ID'], 'BEN-B');
+  assert.equal(preview.rows[1]['Beneficiaries.Beneficiary[1].ID'], 'BEN-C');
+  assert.equal(preview.rows[1]['Beneficiaries.Beneficiary[2].ID'], undefined);
+  assert.ok(preview.columns.includes('Beneficiaries.Beneficiary[2].ID'));
+  assert.ok(!preview.columns.includes('Beneficiaries.Beneficiary.ID'));
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'anyaxml-singleton-index-'));
+  const filePath = path.join(directory, 'transactions.xml');
+  try {
+    await writeFile(filePath, xml);
+    const streamedPreview = await buildXmlTablePreviewFromFile(filePath);
+    assert.deepEqual([...streamedPreview.columns].sort(), [...preview.columns].sort());
+    assert.deepEqual(streamedPreview.rows, preview.rows);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('does not add occurrence numbers to singleton transaction information tags', async () => {
+  const xml = '<raw_header>'
+    + '<cibc_reference_number><reference_number>OCT6188450056044_1</reference_number><transactional_information><tran_info_date>2026-07-03</tran_info_date><tran_info_time>15:35:55</tran_info_time></transactional_information></cibc_reference_number>'
+    + '<cibc_reference_number><reference_number>OCT6188450056044_2</reference_number><transactional_information><tran_info_date>2026-07-07</tran_info_date><tran_info_time>16:35:55</tran_info_time></transactional_information></cibc_reference_number>'
+    + '</raw_header>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  const preview = buildXmlTablePreview(parser.parse(xml));
+
+  assert.equal(preview.rows[0]['transactional_information.tran_info_date'], '2026-07-03');
+  assert.equal(preview.rows[0]['transactional_information[1].tran_info_date'], undefined);
+  assert.ok(preview.columns.every((column) => !column.startsWith('transactional_information[1]')));
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'anyaxml-singleton-transaction-info-'));
+  const filePath = path.join(directory, 'transactions.xml');
+  try {
+    await writeFile(filePath, xml);
+    const streamedPreview = await buildXmlTablePreviewFromFile(filePath);
+    assert.deepEqual([...streamedPreview.columns].sort(), [...preview.columns].sort());
+    assert.deepEqual(streamedPreview.rows, preview.rows);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

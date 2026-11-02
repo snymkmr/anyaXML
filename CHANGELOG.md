@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Leave singleton XML elements unindexed in table previews while keeping nested repeated-element columns aligned across rows.
+
 ## 0.2.2
 
 - Replace the XML preview's text pagination controls with accessible arrow buttons.
