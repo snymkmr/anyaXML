@@ -878,12 +878,15 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   visit(parsedXml, "", 0);
 
   if (objectCandidates.length > 0) {
-    objectCandidates.sort((left, right) =>
-      Number(right.rows.length > 1) - Number(left.rows.length > 1) ||
-      right.columns - left.columns ||
-      right.rows.length - left.rows.length ||
-      right.depth - left.depth
-    );
+    objectCandidates.sort((left, right) => {
+      const leftIsRepeated = left.rows.length > 1;
+      const rightIsRepeated = right.rows.length > 1;
+      return Number(rightIsRepeated) - Number(leftIsRepeated) ||
+        (leftIsRepeated && rightIsRepeated ? left.depth - right.depth : 0) ||
+        right.rows.length - left.rows.length ||
+        right.columns - left.columns ||
+        right.depth - left.depth;
+    });
     const selected = objectCandidates[0];
     const repeatedPaths = collectRepeatedXmlPaths(selected.rows);
     const rows = selected.rows.map((row) => flattenXmlRecord(row, repeatedPaths));
@@ -896,7 +899,7 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   }
 
   if (scalarCandidates.length > 0) {
-    scalarCandidates.sort((left, right) => right.values.length - left.values.length || right.depth - left.depth);
+    scalarCandidates.sort((left, right) => right.values.length - left.values.length || left.depth - right.depth);
     const selected = scalarCandidates[0];
     const rows = selected.values.map((value) => ({ Value: formatXmlValue(value) }));
     return {
@@ -996,7 +999,7 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
       const rightStat = right[1];
       const leftShape = (leftStat.childCount + leftStat.attributeCount) / leftStat.count;
       const rightShape = (rightStat.childCount + rightStat.attributeCount) / rightStat.count;
-      return rightShape - leftShape || leftStat.depth - rightStat.depth || rightStat.count - leftStat.count;
+      return leftStat.depth - rightStat.depth || rightStat.count - leftStat.count || rightShape - leftShape;
     });
   if (repeatedRecords.length > 0) {
     return repeatedRecords[0][0];
@@ -1004,7 +1007,7 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
 
   const repeatedValues = candidates
     .filter(([, stat]) => stat.count > 1)
-    .sort((left, right) => right[1].count - left[1].count || right[1].depth - left[1].depth);
+    .sort((left, right) => right[1].count - left[1].count || left[1].depth - right[1].depth);
   if (repeatedValues.length > 0) {
     return repeatedValues[0][0];
   }
@@ -1013,7 +1016,7 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
     .filter(([, stat]) => stat.childCount + stat.attributeCount > 0)
     .sort((left, right) =>
       (right[1].childCount + right[1].attributeCount) - (left[1].childCount + left[1].attributeCount) ||
-      right[1].depth - left[1].depth
+      left[1].depth - right[1].depth
     );
   return singleRecord[0]?.[0] ?? candidates[0]?.[0] ?? "XML";
 }
@@ -1206,7 +1209,12 @@ function collectColumns(rows: Array<Record<string, string>>): string[] {
       columns.add(column);
     }
   }
-  return [...columns];
+  const columnOrder = (column: string): number => {
+    if (/(^|\.)@count$/i.test(column)) return 1;
+    if (column.startsWith("@")) return 0;
+    return column.includes(".") ? 3 : 2;
+  };
+  return [...columns].sort((left, right) => columnOrder(left) - columnOrder(right));
 }
 
 function collectRepeatedXmlPaths(records: Array<Record<string, unknown>>): Set<string> {

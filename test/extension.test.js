@@ -146,6 +146,44 @@ test('does not add occurrence numbers to singleton transaction information tags'
   }
 });
 
+test('prefers repeated parent rows over wider nested groups and orders preview columns', async () => {
+  const group = (name, value) => `<Group><Name>${name}</Name><A>${value}A</A><B>${value}B</B><C>${value}C</C><D>${value}D</D><E>${value}E</E><F>${value}F</F><G>${value}G</G><H>${value}H</H><Detail><Inner>${value}</Inner></Detail></Group>`;
+  const xml = '<Root>'
+    + `<Record id="R1" count="2"><Code>P1</Code><Label>parent one</Label><Details><Note>first note</Note></Details><Groups>${group('child one', '1')}${group('child two', '2')}</Groups></Record>`
+    + `<Record id="R2" count="2"><Code>P2</Code><Label>parent two</Label><Details><Note>second note</Note></Details><Groups>${group('child three', '3')}${group('child four', '4')}</Groups></Record>`
+    + '</Root>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  const preview = buildXmlTablePreview(parser.parse(xml));
+
+  assert.equal(preview.sourcePath, 'Root.Record');
+  assert.equal(preview.totalRows, 2);
+  assert.equal(preview.rows[0]['@id'], 'R1');
+  assert.equal(preview.rows[1]['@id'], 'R2');
+  assert.equal(preview.rows[0]['Groups.Group[1].Name'], 'child one');
+  assert.equal(preview.rows[1]['Groups.Group[2].Name'], 'child four');
+  assert.deepEqual(preview.columns.slice(0, 4), ['@id', '@count', 'Code', 'Label']);
+  assert.ok(preview.columns.slice(4).every((column) => column.includes('.')));
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'anyaxml-parent-rows-'));
+  const filePath = path.join(directory, 'records.xml');
+  try {
+    await writeFile(filePath, xml);
+    const streamedPreview = await buildXmlTablePreviewFromFile(filePath);
+    assert.equal(streamedPreview.sourcePath, 'Root.Record');
+    assert.equal(streamedPreview.totalRows, 2);
+    assert.deepEqual(streamedPreview.columns, preview.columns);
+    assert.deepEqual(streamedPreview.rows, preview.rows);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('validates well-formed XML and reports malformed XML locations', () => {
   assert.equal(validateXml('<root><item>value</item></root>'), true);
 
