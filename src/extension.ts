@@ -239,22 +239,30 @@ export function activate(context: vscode.ExtensionContext): void {
           largeFileValidationState = undefined;
           updateStatusBar();
           try {
-            const validation = await validateLargeXmlFile(
-              context.asAbsolutePath("validateXML.ps1"),
-              resource
-            );
-            largeFileValidationState = validation;
-            if (!validation.isValid) {
-              void vscode.window.showErrorMessage(
-                `Cannot convert ${path.basename(resource.fsPath)}: XML syntax error at line ${validation.line}, column ${validation.column}: ${validation.message}`
+            await vscode.window.withProgress({
+              location: vscode.ProgressLocation.Notification,
+              title: `${minify ? "Minifying" : "Formatting"} ${path.basename(resource.fsPath)}`,
+              cancellable: false
+            }, async (progress) => {
+              progress.report({ message: "Validating XML…" });
+              const validation = await validateLargeXmlFile(
+                context.asAbsolutePath("validateXML.ps1"),
+                resource
               );
-              return;
-            }
+              largeFileValidationState = validation;
+              if (!validation.isValid) {
+                void vscode.window.showErrorMessage(
+                  `Cannot convert ${path.basename(resource.fsPath)}: XML syntax error at line ${validation.line}, column ${validation.column}: ${validation.message}`
+                );
+                return;
+              }
 
-            const outputPath = await getTransformOutputPath(resource.fsPath, minify);
-            await runPowerShell(context.asAbsolutePath("formatXML.ps1"), resource.fsPath, outputPath, minify);
-            const action = minify ? "Minified copy" : "Formatted copy";
-            void vscode.window.showInformationMessage(`${action} saved to ${outputPath}`);
+              progress.report({ message: minify ? "Minifying XML…" : "Formatting XML…" });
+              const outputPath = await getTransformOutputPath(resource.fsPath, minify);
+              await runPowerShell(context.asAbsolutePath("formatXML.ps1"), resource.fsPath, outputPath, minify);
+              const action = minify ? "Minified copy" : "Formatted copy";
+              void vscode.window.showInformationMessage(`${action} saved to ${outputPath}`);
+            });
           } finally {
             pendingLargeFileValidation = undefined;
             updateStatusBar();
@@ -416,7 +424,21 @@ export function activate(context: vscode.ExtensionContext): void {
         try {
           let refreshed: XmlTablePreview;
           if (largeFilePath) {
-            refreshed = await buildXmlTablePreviewFromFile(largeFilePath);
+            refreshed = await vscode.window.withProgress({
+              location: vscode.ProgressLocation.Notification,
+              title: `Refreshing ${fileName} AnyaXML preview`,
+              cancellable: false
+            }, (progress) => {
+              let reportedProgress = 0;
+              return buildXmlTablePreviewFromFile(largeFilePath, (percentage) => {
+                const boundedProgress = Math.max(reportedProgress, Math.min(100, percentage));
+                progress.report({
+                  increment: boundedProgress - reportedProgress,
+                  message: `${Math.round(boundedProgress)}%`
+                });
+                reportedProgress = boundedProgress;
+              });
+            });
           } else if (document) {
             const xml = document.getText();
             const validation = XMLValidator.validate(xml);
@@ -482,7 +504,21 @@ export function activate(context: vscode.ExtensionContext): void {
     if (largeFilePath) {
       const initialRequestId = refreshRequestId;
       try {
-        const initialPreview = await buildXmlTablePreviewFromFile(largeFilePath);
+        const initialPreview = await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Reading ${fileName} for AnyaXML preview`,
+          cancellable: false
+        }, (progress) => {
+          let reportedProgress = 0;
+          return buildXmlTablePreviewFromFile(largeFilePath, (percentage) => {
+            const boundedProgress = Math.max(reportedProgress, Math.min(100, percentage));
+            progress.report({
+              increment: boundedProgress - reportedProgress,
+              message: `${Math.round(boundedProgress)}%`
+            });
+            reportedProgress = boundedProgress;
+          });
+        });
         if (initialRequestId !== refreshRequestId) {
           return;
         }
@@ -505,10 +541,14 @@ export function activate(context: vscode.ExtensionContext): void {
           largeFileValidationState = undefined;
           updateStatusBar();
           try {
-            largeFileValidationState = await validateLargeXmlFile(
+            largeFileValidationState = await vscode.window.withProgress({
+              location: vscode.ProgressLocation.Notification,
+              title: `Validating ${path.basename(resource.fsPath)}`,
+              cancellable: false
+            }, () => validateLargeXmlFile(
               context.asAbsolutePath("validateXML.ps1"),
               resource
-            );
+            ));
           } finally {
             pendingLargeFileValidation = undefined;
             updateStatusBar();
@@ -925,9 +965,18 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
   };
 }
 
-export async function buildXmlTablePreviewFromFile(filePath: string): Promise<XmlTablePreview> {
+export async function buildXmlTablePreviewFromFile(
+  filePath: string,
+  onProgress?: (percentage: number) => void
+): Promise<XmlTablePreview> {
   const statistics = new Map<string, XmlPathStat>();
   const scanStack: XmlStreamFrame[] = [];
+  const fileSize = onProgress ? (await fs.stat(filePath)).size : 0;
+  const reportScanProgress = (scan: number) => (bytesRead: number): void => {
+    if (fileSize > 0) {
+      onProgress?.(((scan + Math.min(bytesRead, fileSize) / fileSize) / 2) * 100);
+    }
+  };
 
   await streamXmlFile(filePath, {
     open: (tag) => {
@@ -981,12 +1030,13 @@ export async function buildXmlTablePreviewFromFile(filePath: string): Promise<Xm
       }
     },
     text: () => undefined
-  });
+  }, reportScanProgress(0));
 
   const targetPath = selectXmlTablePath(statistics);
   const repeatedPaths = statistics.get(targetPath)?.repeatedChildPaths ?? new Set<string>();
-  const rows = await collectXmlTableRows(filePath, targetPath, repeatedPaths);
+  const rows = await collectXmlTableRows(filePath, targetPath, repeatedPaths, reportScanProgress(1));
   const columns = collectColumns(rows);
+  onProgress?.(100);
   return { columns, rows, sourcePath: targetPath, totalRows: rows.length };
 }
 
@@ -1024,7 +1074,8 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
 async function collectXmlTableRows(
   filePath: string,
   targetPath: string,
-  repeatedPaths: Set<string>
+  repeatedPaths: Set<string>,
+  onBytesRead?: (bytesRead: number) => void
 ): Promise<Array<Record<string, string>>> {
   const pathStack: string[] = [];
   const captureStack: XmlPreviewNode[] = [];
@@ -1060,7 +1111,7 @@ async function collectXmlTableRows(
         currentNode.text.push(text);
       }
     }
-  });
+  }, onBytesRead);
 
   return rows;
 }
@@ -1102,11 +1153,16 @@ function flattenXmlPreviewNode(node: XmlPreviewNode, repeatedPaths: Set<string>)
   return flattened;
 }
 
-async function streamXmlFile(filePath: string, events: XmlStreamEvents): Promise<void> {
+async function streamXmlFile(
+  filePath: string,
+  events: XmlStreamEvents,
+  onBytesRead?: (bytesRead: number) => void
+): Promise<void> {
   const input = createReadStream(filePath);
   const xmlParser = createSaxParser(true, { trim: false });
   let parseError: Error | undefined;
   let decoder: TextDecoder | undefined;
+  let bytesRead = 0;
   xmlParser.onopentag = (tag) => events.open(tag);
   xmlParser.onclosetag = (name) => events.close(name);
   xmlParser.ontext = (text) => events.text(text);
@@ -1121,6 +1177,8 @@ async function streamXmlFile(filePath: string, events: XmlStreamEvents): Promise
         throw parseError;
       }
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      bytesRead += bytes.byteLength;
+      onBytesRead?.(bytesRead);
       decoder ??= createXmlTextDecoder(bytes);
       const text = decoder.decode(bytes, { stream: true });
       if (text) {

@@ -71,11 +71,14 @@ test('flattens repeated beneficiaries into one-based columns for 10,245 transact
   const filePath = path.join(directory, 'transactions.xml');
   try {
     await writeFile(filePath, xml);
-    const streamedPreview = await buildXmlTablePreviewFromFile(filePath);
+    const progress = [];
+    const streamedPreview = await buildXmlTablePreviewFromFile(filePath, percentage => progress.push(percentage));
     assert.equal(streamedPreview.sourcePath, preview.sourcePath);
     assert.equal(streamedPreview.totalRows, transactionCount);
     assert.deepEqual([...streamedPreview.columns].sort(), [...preview.columns].sort());
     assert.deepEqual(streamedPreview.rows[0], preview.rows[0]);
+    assert.equal(progress.at(-1), 100);
+    assert.ok(progress.every((percentage, index) => index === 0 || percentage >= progress[index - 1]));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

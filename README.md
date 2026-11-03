@@ -22,6 +22,7 @@ For regular XML files, either right-click in the editor or right-click the file 
   - **AnyaXML: Format XML Document** saves a separate `*_formatted.xml` copy.
   - **AnyaXML: Minify XML Document** saves a separate `*_minified.xml` copy.
   - **AnyaXML: Validate XML** checks the file and reports the first syntax error.
+- Large-file validation and conversions show a progress notification. Large-file previews and refreshes report read progress while scanning the file.
 - If the source name already ends in `_formatted` or `_minified`, AnyaXML reuses that base name instead of appending another marker. It also recognizes the older one-line suffix on files made with a previous version. If the destination already exists, AnyaXML adds a number. Formatting and minifying leave the original unchanged.
 
 Validation shows a green or red result in the status bar and a message with the error location. VS Code cannot show editor diagnostics or live validation for these files because they cannot be opened in the editor.
