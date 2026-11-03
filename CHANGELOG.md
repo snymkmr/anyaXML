@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5
+
+- Add progress notifications for large-file validation, formatting, and table previews; previews and refreshes report percentage progress.
+- Prefer repeated parent elements for table rows and improve column ordering in XML previews.
+
 ## 0.2.4
 
 - Leave singleton XML elements unindexed in table previews while keeping nested repeated-element columns aligned across rows.
