@@ -1268,9 +1268,9 @@ function collectColumns(rows: Array<Record<string, string>>): string[] {
     }
   }
   const columnOrder = (column: string): number => {
-    if (/(^|\.)@count$/i.test(column)) return 1;
     if (column.startsWith("@")) return 0;
-    return column.includes(".") ? 3 : 2;
+    if (/(^|\.)@count$/i.test(column)) return 3;
+    return column.includes(".") ? 4 : 2;
   };
   return [...columns].sort((left, right) => columnOrder(left) - columnOrder(right));
 }

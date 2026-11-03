@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Keep count attributes on nested elements with their fields in XML table previews.
+
 ## 0.2.5
 
 - Add progress notifications for large-file validation, formatting, and table previews; previews and refreshes report percentage progress.

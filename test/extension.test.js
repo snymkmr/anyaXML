@@ -31,6 +31,36 @@ test('supports case-insensitive exact-value filtering', () => {
   assert.deepEqual(getFilteredXmlTableRows(preview, '  TORONTO  ', true), [{ city: 'Toronto' }]);
 });
 
+test('keeps nested count attributes with their element fields in preview order', () => {
+  const transaction = (sequence, detailsOfCharges, firstId, secondId) =>
+    `<Transaction sequence="${sequence}"><MessageType>MT103</MessageType>`
+      + `<DetailsOfCharges>${detailsOfCharges}</DetailsOfCharges><Beneficiaries count="2">`
+      + `<Beneficiary><ID>${firstId}</ID></Beneficiary>`
+      + `<Beneficiary><ID>${secondId}</ID></Beneficiary>`
+      + '</Beneficiaries></Transaction>';
+  const xml = '<Transactions>'
+    + transaction('1', 'SHA', 'BEN00000001', 'TEST00000001B')
+    + transaction('2', 'OUR', 'BEN00000002', 'TEST00000002B')
+    + '</Transactions>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  const preview = buildXmlTablePreview(parser.parse(xml));
+
+  assert.deepEqual(preview.columns, [
+    '@sequence',
+    'MessageType',
+    'DetailsOfCharges',
+    'Beneficiaries.@count',
+    'Beneficiaries.Beneficiary[1].ID',
+    'Beneficiaries.Beneficiary[2].ID'
+  ]);
+});
+
 test('flattens repeated beneficiaries into one-based columns for 10,245 transactions', async () => {
   const transactionCount = 10_245;
   const transactions = Array.from({ length: transactionCount }, (_, index) => {
