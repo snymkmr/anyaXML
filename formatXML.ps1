@@ -7,6 +7,8 @@ param(
     [switch]$Minify = $false
 )
 
+$script:XmlLineBreakCharacters = [char[]]@("`r", "`n")
+
 function Write-XMLTextPreservingLineBreaks {
     param(
         [System.Xml.XmlWriter]$writer,
@@ -14,14 +16,21 @@ function Write-XMLTextPreservingLineBreaks {
     )
 
     $segmentStart = 0
-    for ($index = 0; $index -lt $value.Length; $index++) {
-        if ($value[$index] -eq "`r" -or $value[$index] -eq "`n") {
-            if ($index -gt $segmentStart) {
-                $writer.WriteString($value.Substring($segmentStart, $index - $segmentStart))
-            }
-            $writer.WriteCharEntity($value[$index])
-            $segmentStart = $index + 1
+    $index = $value.IndexOfAny($script:XmlLineBreakCharacters)
+    if ($index -lt 0) {
+        if ($value.Length -gt 0) {
+            $writer.WriteString($value)
         }
+        return
+    }
+
+    while ($index -ge 0) {
+        if ($index -gt $segmentStart) {
+            $writer.WriteString($value.Substring($segmentStart, $index - $segmentStart))
+        }
+        $writer.WriteCharEntity($value[$index])
+        $segmentStart = $index + 1
+        $index = $value.IndexOfAny($script:XmlLineBreakCharacters, $segmentStart)
     }
 
     if ($segmentStart -lt $value.Length) {
@@ -35,8 +44,33 @@ function Write-XMLReaderToWriter {
         [System.Xml.XmlWriter]$writer
     )
 
-    $elementDepth = 0
+    $elementStates = New-Object System.Collections.ArrayList
     while ($reader.Read()) {
+        $nodeType = $reader.NodeType.ToString()
+        $parentState = if ($elementStates.Count -gt 0) { $elementStates[$elementStates.Count - 1] } else { $null }
+
+        if ($nodeType -eq "Whitespace" -and $null -ne $parentState) {
+            [void]$parentState.PendingWhitespace.Append($reader.Value)
+            continue
+        }
+
+        if ($null -ne $parentState -and $parentState.PendingWhitespace.Length -gt 0) {
+            $nextNodeStartsMarkup = $nodeType -in @("Element", "Comment", "ProcessingInstruction")
+            $nextNodeIsMarkup = $nextNodeStartsMarkup -or $nodeType -eq "EndElement"
+            $pendingWhitespace = $parentState.PendingWhitespace.ToString()
+            $containsLineBreak = $pendingWhitespace.IndexOfAny($script:XmlLineBreakCharacters) -ge 0
+            $isIndentation = -not $parentState.HasTextContent -and $nextNodeIsMarkup -and (
+                $parentState.LastChildWasMarkup -or ($nextNodeStartsMarkup -and $containsLineBreak)
+            )
+
+            if (-not $isIndentation) {
+                Write-XMLTextPreservingLineBreaks -writer $writer -value $pendingWhitespace
+                $parentState.LastChildWasMarkup = $false
+                $parentState.HasTextContent = $true
+            }
+            $parentState.PendingWhitespace.Clear() | Out-Null
+        }
+
         switch ($reader.NodeType.ToString()) {
             "XmlDeclaration" {
                 if ($reader.Value -match 'standalone\s*=\s*["'']yes["'']') {
@@ -49,6 +83,9 @@ function Write-XMLReaderToWriter {
                 break
             }
             "Element" {
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $true
+                }
                 $writer.WriteStartElement($reader.Prefix, $reader.LocalName, $reader.NamespaceURI)
                 if ($reader.MoveToFirstAttribute()) {
                     do {
@@ -61,35 +98,56 @@ function Write-XMLReaderToWriter {
                 if ($reader.IsEmptyElement) {
                     $writer.WriteEndElement()
                 } else {
-                    $elementDepth++
+                    [void]$elementStates.Add(@{
+                        PendingWhitespace = New-Object System.Text.StringBuilder
+                        LastChildWasMarkup = $false
+                        HasTextContent = $false
+                    })
                 }
                 break
             }
             "EndElement" {
                 $writer.WriteFullEndElement()
-                $elementDepth--
+                if ($elementStates.Count -gt 0) {
+                    $elementStates.RemoveAt($elementStates.Count - 1)
+                }
                 break
             }
             { $_ -in @("Text", "CDATA") } {
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $false
+                    $parentState.HasTextContent = $true
+                }
                 # CDATA is emitted as ordinary text; character references preserve
-                # line breaks while keeping the serialized XML on one line.
+                # line breaks in real text while keeping the serialized XML on one line.
                 Write-XMLTextPreservingLineBreaks -writer $writer -value $reader.Value
                 break
             }
-            { $_ -in @("Whitespace", "SignificantWhitespace") } {
-                # Ignore document-level whitespace; character references are only
-                # valid inside the document element.
-                if ($elementDepth -gt 0) {
+            "SignificantWhitespace" {
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $false
+                    $parentState.HasTextContent = $true
+                }
+                if ($null -ne $parentState) {
                     Write-XMLTextPreservingLineBreaks -writer $writer -value $reader.Value
                 }
                 break
             }
             "Comment" {
-                $writer.WriteComment($reader.Value)
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $true
+                }
+                $writer.WriteComment([System.Text.RegularExpressions.Regex]::Replace($reader.Value, "`r`n|`r|`n", " "))
                 break
             }
             "ProcessingInstruction" {
-                $writer.WriteProcessingInstruction($reader.Name, $reader.Value)
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $true
+                }
+                $writer.WriteProcessingInstruction(
+                    $reader.Name,
+                    [System.Text.RegularExpressions.Regex]::Replace($reader.Value, "`r`n|`r|`n", " ")
+                )
                 break
             }
             "DocumentType" {
@@ -102,9 +160,49 @@ function Write-XMLReaderToWriter {
                 break
             }
             "EntityReference" {
+                if ($null -ne $parentState) {
+                    $parentState.LastChildWasMarkup = $false
+                }
                 $writer.WriteEntityRef($reader.Name)
                 break
             }
+        }
+    }
+}
+
+function Test-FileContainsLineBreak {
+    param([string]$FilePath)
+
+    $reader = $null
+    try {
+        $reader = New-Object System.IO.StreamReader($FilePath, $true)
+        $buffer = New-Object char[] 8192
+        while (($read = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $chunk = New-Object string($buffer, 0, $read)
+            if ($chunk.IndexOfAny($script:XmlLineBreakCharacters) -ge 0) {
+                return $true
+            }
+        }
+        return $false
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+    }
+}
+
+function Test-FileHasXmlDeclaration {
+    param([string]$FilePath)
+
+    $reader = $null
+    try {
+        $reader = [System.Xml.XmlReader]::Create($FilePath)
+        return $reader.Read() -and $reader.NodeType -eq [System.Xml.XmlNodeType]::XmlDeclaration
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
         }
     }
 }
@@ -123,6 +221,7 @@ function Format-XMLContent {
 
         $settings = New-Object System.Xml.XmlWriterSettings
         $settings.Indent = $false
+        $settings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
         $settings.NewLineHandling = [System.Xml.NewLineHandling]::Entitize
 
         $tempFile = [System.IO.Path]::GetTempFileName()
@@ -191,8 +290,8 @@ function Format-XMLContentStreaming {
 
     $readerSettings = New-Object System.Xml.XmlReaderSettings
     $readerSettings.ConformanceLevel = "Document"
-    # XML alone cannot distinguish formatting whitespace from meaningful text.
-    # Keep whitespace nodes in minify mode to preserve the document's content.
+    # Keep whitespace nodes so the minifier can remove indentation only when it
+    # appears between markup, while preserving whitespace in text-only content.
     $readerSettings.IgnoreWhitespace = $false
 
     $writerSettings = New-Object System.Xml.XmlWriterSettings
@@ -201,6 +300,7 @@ function Format-XMLContentStreaming {
     $writerSettings.IndentChars = "  "
     $writerSettings.NewLineChars = "`n"
     if ($Minify) {
+        $writerSettings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
         $writerSettings.NewLineHandling = [System.Xml.NewLineHandling]::Entitize
     }
     $writerSettings.Encoding = [System.Text.UTF8Encoding]::new($false)
@@ -299,6 +399,15 @@ try {
         Write-Host "$action XML..." -ForegroundColor Yellow
         $formattedXml = Format-XMLContent -inputFilePath $inputPath -Minify:$Minify
         [System.IO.File]::WriteAllText($temporaryOutputPath, $formattedXml, [System.Text.Encoding]::UTF8)
+    }
+
+    # XmlWriter can normalize a compact single-line source into a slightly
+    # longer equivalent form (for example, spacing empty-element tags). Keep
+    # the original bytes when that would make an already one-line input larger.
+    if ($Minify -and (Get-Item -Force -LiteralPath $temporaryOutputPath).Length -gt (Get-Item -Force -LiteralPath $inputPath).Length) {
+        if (-not (Test-FileContainsLineBreak -FilePath $inputPath)) {
+            Copy-Item -LiteralPath $inputPath -Destination $temporaryOutputPath -Force
+        }
     }
 
     Move-Item -LiteralPath $temporaryOutputPath -Destination $outputPath -Force

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { Readable, Transform } from "node:stream";
@@ -777,7 +777,18 @@ function getPowerShellExecutable(): string {
     .getConfiguration("anyaxml")
     .get<string>("powershellExecutable", "")
     .trim();
-  return configuredExecutable || (process.platform === "win32" ? "powershell.exe" : "pwsh");
+  if (configuredExecutable) {
+    return configuredExecutable;
+  }
+
+  if (process.platform === "win32") {
+    return "powershell.exe";
+  }
+
+  const commonInstallPaths = process.platform === "darwin"
+    ? ["/opt/homebrew/bin/pwsh", "/usr/local/bin/pwsh"]
+    : ["/usr/bin/pwsh", "/usr/local/bin/pwsh"];
+  return commonInstallPaths.find((candidate) => existsSync(candidate)) ?? "pwsh";
 }
 
 function getPowerShellSpawnOptions(): { windowsHide: true; env: NodeJS.ProcessEnv } {
@@ -927,7 +938,17 @@ export function buildXmlTablePreview(parsedXml: unknown): XmlTablePreview {
         right.columns - left.columns ||
         right.depth - left.depth;
     });
-    const selected = objectCandidates[0];
+    const repeatedCandidate = objectCandidates[0];
+    const selected = repeatedCandidate.rows.length > 1
+      ? objectCandidates
+        .filter((candidate) =>
+          candidate.rows.length === 1 &&
+          candidate.path !== repeatedCandidate.path &&
+          repeatedCandidate.path.startsWith(`${candidate.path}.`) &&
+          isXmlPathUnderCollection(candidate.path)
+        )
+        .sort((left, right) => left.depth - right.depth)[0] ?? repeatedCandidate
+      : repeatedCandidate;
     const repeatedPaths = collectRepeatedXmlPaths(selected.rows);
     const rows = selected.rows.map((row) => flattenXmlRecord(row, repeatedPaths));
     return {
@@ -1052,6 +1073,18 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
       return leftStat.depth - rightStat.depth || rightStat.count - leftStat.count || rightShape - leftShape;
     });
   if (repeatedRecords.length > 0) {
+    const repeatedPath = repeatedRecords[0][0];
+    const collectionRecord = candidates
+      .filter(([candidatePath, stat]) =>
+        stat.count === 1 &&
+        stat.childCount + stat.attributeCount > 0 &&
+        repeatedPath.startsWith(`${candidatePath}.`) &&
+        isXmlPathUnderCollection(candidatePath)
+      )
+      .sort((left, right) => left[1].depth - right[1].depth)[0];
+    if (collectionRecord) {
+      return collectionRecord[0];
+    }
     return repeatedRecords[0][0];
   }
 
@@ -1069,6 +1102,17 @@ function selectXmlTablePath(statistics: Map<string, XmlPathStat>): string {
       left[1].depth - right[1].depth
     );
   return singleRecord[0]?.[0] ?? candidates[0]?.[0] ?? "XML";
+}
+
+function isXmlPathUnderCollection(xmlPath: string): boolean {
+  const pathParts = xmlPath.split(".");
+  if (pathParts.length < 2) {
+    return false;
+  }
+
+  const parentName = pathParts[pathParts.length - 2].toLowerCase();
+  return parentName.endsWith("ies") ||
+    (parentName.endsWith("s") && !/(ss|us|is)$/.test(parentName));
 }
 
 async function collectXmlTableRows(

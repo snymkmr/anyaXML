@@ -61,6 +61,41 @@ test('keeps nested count attributes with their element fields in preview order',
   ]);
 });
 
+test('previews a singleton report as the row when it contains repeated identifiers', () => {
+  const xml = '<FINTRACBatchReport>'
+    + '<BatchHeader><BatchId>BATCH-1</BatchId></BatchHeader>'
+    + '<Reports><EFTReport><ReportReference>REF-1</ReportReference>'
+    + '<TransactionInformation><Amount>12000.00</Amount><CurrencyCode>CAD</CurrencyCode></TransactionInformation>'
+    + '<OrderingClient><Individual><LastName>Smith</LastName><Identifiers count="2">'
+    + '<Identifier><IDType>DriversLicense</IDType><IDNumber>S1234</IDNumber></Identifier>'
+    + '<Identifier><IDType>Passport</IDType><IDNumber>ZE998</IDNumber></Identifier>'
+    + '</Identifiers></Individual><AccountNumber>9876543210</AccountNumber></OrderingClient>'
+    + '<BeneficiaryClient><AccountNumber>1122334455</AccountNumber></BeneficiaryClient>'
+    + '</EFTReport></Reports><BatchTrailer><TotalReportCount>1</TotalReportCount></BatchTrailer>'
+    + '</FINTRACBatchReport>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+
+  const preview = buildXmlTablePreview(parser.parse(xml));
+
+  assert.equal(preview.sourcePath, 'FINTRACBatchReport.Reports.EFTReport');
+  assert.equal(preview.totalRows, 1);
+  assert.equal(preview.rows[0].ReportReference, 'REF-1');
+  assert.equal(preview.rows[0]['TransactionInformation.Amount'], '12000.00');
+  assert.equal(preview.rows[0]['OrderingClient.Individual.LastName'], 'Smith');
+  assert.equal(preview.rows[0]['OrderingClient.Individual.Identifiers.@count'], '2');
+  assert.equal(preview.rows[0]['OrderingClient.Individual.Identifiers.Identifier[1].IDNumber'], 'S1234');
+  assert.equal(preview.rows[0]['OrderingClient.Individual.Identifiers.Identifier[2].IDNumber'], 'ZE998');
+  assert.equal(preview.rows[0]['BeneficiaryClient.AccountNumber'], '1122334455');
+  assert.ok(!preview.columns.includes('BatchHeader.BatchId'));
+  assert.ok(!preview.columns.includes('BatchTrailer.TotalReportCount'));
+});
+
 test('flattens repeated beneficiaries into one-based columns for 10,245 transactions', async () => {
   const transactionCount = 10_245;
   const transactions = Array.from({ length: transactionCount }, (_, index) => {

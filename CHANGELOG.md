@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.7
+
+- Minify removes indentation-only whitespace between markup so the output stays on one line and is smaller for pretty-printed XML. Mixed-content spaces remain unchanged, comment and processing-instruction line breaks are flattened, and the streaming path uses the same behavior.
+- Prefer a singleton record inside a collection element over its nested repeated group when choosing XML preview rows, in both regular and streaming previews.
+- Find PowerShell in common install paths when the extension host does not inherit it on `PATH`.
+
 ## 0.2.6
 
 - Keep count attributes on nested elements with their fields in XML table previews.
