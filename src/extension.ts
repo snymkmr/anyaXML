@@ -1291,7 +1291,7 @@ function flattenXmlRecord(
     }
 
     if (isRecord(value)) {
-      const entries = Object.entries(value);
+      const entries = attributesFirst(Object.entries(value));
       if (entries.length === 0) {
         flattened[columnPath] = "";
         return;
@@ -1305,25 +1305,53 @@ function flattenXmlRecord(
     flattened[columnPath || "Value"] = formatXmlValue(value);
   };
 
-  for (const [key, value] of Object.entries(record)) {
+  for (const [key, value] of attributesFirst(Object.entries(record))) {
     addValue(value, key);
   }
   return flattened;
 }
 
+// The parser lists an element's attributes after its children; in the XML they
+// come first, so put them first to keep columns in document order.
+function attributesFirst(entries: Array<[string, unknown]>): Array<[string, unknown]> {
+  const attributes = entries.filter(([key]) => key.startsWith("@"));
+  return attributes.length === 0 || attributes.length === entries.length
+    ? entries
+    : [...attributes, ...entries.filter(([key]) => !key.startsWith("@"))];
+}
+
 function collectColumns(rows: Array<Record<string, string>>): string[] {
-  const columns = new Set<string>();
+  // Merge each row's columns in document order. A column first seen in a later
+  // row (for example Identifier[3] when earlier rows have two) is inserted right
+  // after the column that precedes it in that row, so groups stay together and
+  // attributes such as @count stay beside the elements they describe.
+  const columns: string[] = [];
+  let positions = new Map<string, number>();
   for (const row of rows) {
+    let cursor = -1;
     for (const column of Object.keys(row)) {
-      columns.add(column);
+      const position = positions.get(column);
+      if (position !== undefined) {
+        cursor = position;
+        continue;
+      }
+      cursor += 1;
+      if (cursor === columns.length) {
+        columns.push(column);
+        positions.set(column, cursor);
+      } else {
+        columns.splice(cursor, 0, column);
+        positions = new Map(columns.map((name, index) => [name, index]));
+      }
     }
   }
+  // Root attributes first, then the row's direct fields, then nested fields; the
+  // sort is stable, so document order is kept within each group.
   const columnOrder = (column: string): number => {
     if (column.startsWith("@")) return 0;
-    if (/(^|\.)@count$/i.test(column)) return 3;
-    return column.includes(".") ? 4 : 2;
+    return column.includes(".") ? 2 : 1;
   };
-  return [...columns].sort((left, right) => columnOrder(left) - columnOrder(right));
+  return columns.sort((left, right) => columnOrder(left) - columnOrder(right));
 }
 
 function collectRepeatedXmlPaths(records: Array<Record<string, unknown>>): Set<string> {

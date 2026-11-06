@@ -61,6 +61,68 @@ test('keeps nested count attributes with their element fields in preview order',
   ]);
 });
 
+test('places a deeply nested count beside its group instead of before other nested fields', async () => {
+  const xml = '<Reports><EFTReport type="SWIFT"><ReportReference>REF-1</ReportReference>'
+    + '<TransactionInformation><Amount>12000.00</Amount></TransactionInformation>'
+    + '<OrderingClient><Individual><LastName>Smith</LastName>'
+    + '<Address><City>Toronto</City></Address><Identifiers count="2">'
+    + '<Identifier><IDType>DriversLicense</IDType></Identifier>'
+    + '<Identifier><IDType>Passport</IDType></Identifier>'
+    + '</Identifiers></Individual><AccountNumber>9876543210</AccountNumber></OrderingClient>'
+    + '</EFTReport></Reports>';
+  const expected = [
+    '@type',
+    'ReportReference',
+    'TransactionInformation.Amount',
+    'OrderingClient.Individual.LastName',
+    'OrderingClient.Individual.Address.City',
+    'OrderingClient.Individual.Identifiers.@count',
+    'OrderingClient.Individual.Identifiers.Identifier[1].IDType',
+    'OrderingClient.Individual.Identifiers.Identifier[2].IDType',
+    'OrderingClient.AccountNumber'
+  ];
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  assert.deepEqual(buildXmlTablePreview(parser.parse(xml)).columns, expected);
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'anyaxml-nested-count-'));
+  try {
+    const filePath = path.join(directory, 'report.xml');
+    await writeFile(filePath, xml);
+    assert.deepEqual((await buildXmlTablePreviewFromFile(filePath)).columns, expected);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('keeps extra repeated columns from later rows next to their group', () => {
+  const xml = '<Reports>'
+    + '<R><Ref>A</Ref><Client><Name>X</Name><Ids count="1"><Id><T>DL</T></Id></Ids><Acct>1</Acct></Client></R>'
+    + '<R><Ref>B</Ref><Client><Name>Y</Name><Ids count="3"><Id><T>DL</T></Id><Id><T>PP</T></Id><Id><T>HC</T></Id></Ids><Acct>2</Acct></Client></R>'
+    + '</Reports>';
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@',
+    parseTagValue: false,
+    parseAttributeValue: false,
+    isArray: (_name, _jPath, _isLeafNode, isAttribute) => !isAttribute
+  });
+  assert.deepEqual(buildXmlTablePreview(parser.parse(xml)).columns, [
+    'Ref',
+    'Client.Name',
+    'Client.Ids.@count',
+    'Client.Ids.Id[1].T',
+    'Client.Ids.Id[2].T',
+    'Client.Ids.Id[3].T',
+    'Client.Acct'
+  ]);
+});
+
 test('previews a singleton report as the row when it contains repeated identifiers', () => {
   const xml = '<FINTRACBatchReport>'
     + '<BatchHeader><BatchId>BATCH-1</BatchId></BatchHeader>'
