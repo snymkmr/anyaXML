@@ -2,13 +2,14 @@
   "name": "anyaxml",
   "displayName": "AnyaXML",
   "description": "Format, minify, validate, and preview XML as tables in VS Code.",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "publisher": "Sanyam",
   "repository": {
     "type": "git",
     "url": "https://github.com/snymkmr/anyaXML.git"
   },
   "icon": "icon.png",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
   },
