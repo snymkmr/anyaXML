@@ -701,6 +701,8 @@ function runPowerShell(
   ];
   if (minify) {
     args.push("-Minify");
+  } else {
+    args.push("-Indent", getIndentSetting());
   }
 
   return new Promise((resolve, reject) => {
@@ -789,6 +791,11 @@ function getPowerShellExecutable(): string {
     ? ["/opt/homebrew/bin/pwsh", "/usr/local/bin/pwsh"]
     : ["/usr/bin/pwsh", "/usr/local/bin/pwsh"];
   return commonInstallPaths.find((candidate) => existsSync(candidate)) ?? "pwsh";
+}
+
+function getIndentSetting(): string {
+  const indent = vscode.workspace.getConfiguration("anyaxml").get<string>("indent", "tab");
+  return indent === "2" || indent === "4" ? indent : "tab";
 }
 
 function getPowerShellSpawnOptions(): { windowsHide: true; env: NodeJS.ProcessEnv } {

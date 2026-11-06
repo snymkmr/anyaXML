@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Minify no longer rewrites content. It copies values, attributes, entities, CDATA, comments, the declaration, encoding and BOM exactly as written and removes only whitespace between tags. It is also much faster on large files (about 2s instead of 27s for 52 MB).
+- Format indents with tabs by default. Add the `anyaxml.indent` setting (`tab`, `2` or `4`).
+- Format keeps the source's BOM in both regular and streaming mode, and no longer adds an XML declaration to files that did not have one.
+
 ## 0.2.7
 
 - Minify removes indentation-only whitespace between markup so the output stays on one line and is smaller for pretty-printed XML. Mixed-content spaces remain unchanged, comment and processing-instruction line breaks are flattened, and the streaming path uses the same behavior.
