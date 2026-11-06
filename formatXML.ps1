@@ -4,186 +4,353 @@ param(
     [string]$OutputFile = "",
     [switch]$Streaming = $false,
     [Alias("OneLine")]
-    [switch]$Minify = $false
+    [switch]$Minify = $false,
+    # Indentation used when formatting: "tab" (default) or a number of spaces.
+    [string]$Indent = "tab"
 )
 
-$script:XmlLineBreakCharacters = [char[]]@("`r", "`n")
+$script:LexicalMinifierSource = @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
 
-function Write-XMLTextPreservingLineBreaks {
-    param(
-        [System.Xml.XmlWriter]$writer,
-        [string]$value
-    )
+namespace AnyaXml
+{
+    // Minifies XML lexically: every tag, value, CDATA section, comment, processing
+    // instruction and declaration is copied exactly as written, and only whitespace
+    // that sits between markup (indentation) is removed. The text is never parsed
+    // into a tree and re-serialized, so values, quoting, entities and bytes stay
+    // as they were in the source.
+    public static class LexicalMinifier
+    {
+        public static void Minify(string inputPath, string outputPath)
+        {
+            byte[] head = new byte[4];
+            int headLength;
+            using (FileStream probe = File.OpenRead(inputPath))
+            {
+                headLength = ReadUpTo(probe, head);
+            }
 
-    $segmentStart = 0
-    $index = $value.IndexOfAny($script:XmlLineBreakCharacters)
-    if ($index -lt 0) {
-        if ($value.Length -gt 0) {
-            $writer.WriteString($value)
+            int bomLength;
+            Encoding encoding = DetectEncoding(head, headLength, out bomLength);
+
+            using (FileStream input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536))
+            using (FileStream output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            {
+                if (bomLength > 0)
+                {
+                    byte[] bom = new byte[bomLength];
+                    ReadUpTo(input, bom);
+                    output.Write(bom, 0, bomLength);
+                }
+
+                using (StreamReader reader = new StreamReader(input, encoding, false, 65536))
+                using (StreamWriter writer = new StreamWriter(output, encoding, 65536))
+                {
+                    new Scanner(reader, writer).Run();
+                }
+            }
         }
-        return
-    }
 
-    while ($index -ge 0) {
-        if ($index -gt $segmentStart) {
-            $writer.WriteString($value.Substring($segmentStart, $index - $segmentStart))
+        static int ReadUpTo(Stream stream, byte[] buffer)
+        {
+            int total = 0;
+            while (total < buffer.Length)
+            {
+                int read = stream.Read(buffer, total, buffer.Length - total);
+                if (read <= 0) break;
+                total += read;
+            }
+            return total;
         }
-        $writer.WriteCharEntity($value[$index])
-        $segmentStart = $index + 1
-        $index = $value.IndexOfAny($script:XmlLineBreakCharacters, $segmentStart)
-    }
 
-    if ($segmentStart -lt $value.Length) {
-        $writer.WriteString($value.Substring($segmentStart))
+        static Encoding DetectEncoding(byte[] b, int n, out int bomLength)
+        {
+            bomLength = 0;
+            if (n >= 4 && b[0] == 0xFF && b[1] == 0xFE && b[2] == 0 && b[3] == 0) { bomLength = 4; return new UTF32Encoding(false, false); }
+            if (n >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0xFE && b[3] == 0xFF) { bomLength = 4; return new UTF32Encoding(true, false); }
+            if (n >= 2 && b[0] == 0xFF && b[1] == 0xFE) { bomLength = 2; return new UnicodeEncoding(false, false); }
+            if (n >= 2 && b[0] == 0xFE && b[1] == 0xFF) { bomLength = 2; return new UnicodeEncoding(true, false); }
+            if (n >= 4 && b[0] == 0x3C && b[1] == 0 && b[2] == 0 && b[3] == 0) { return new UTF32Encoding(false, false); }
+            if (n >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0x3C) { return new UTF32Encoding(true, false); }
+            if (n >= 2 && b[0] == 0x3C && b[1] == 0) { return new UnicodeEncoding(false, false); }
+            if (n >= 2 && b[0] == 0 && b[1] == 0x3C) { return new UnicodeEncoding(true, false); }
+            // UTF-8 and other ASCII-compatible encodings: ISO-8859-1 maps every byte to
+            // exactly one char and back, so the original bytes (including a UTF-8 BOM)
+            // pass through unchanged while markup characters are still recognized.
+            return Encoding.GetEncoding(28591);
+        }
+
+        sealed class Scanner
+        {
+            static readonly Regex XmlSpaceAttribute = new Regex(
+                @"\sxml:space\s*=\s*(?:""(preserve|default)""|'(preserve|default)')",
+                RegexOptions.CultureInvariant);
+
+            readonly TextReader reader;
+            readonly TextWriter writer;
+            readonly List<bool> preserveStack = new List<bool>();
+            readonly List<bool> hasTextStack = new List<bool>();
+            readonly StringBuilder pending = new StringBuilder();
+            readonly StringBuilder tag = new StringBuilder();
+            int peeked = -2;
+            bool previousWasStartTag;
+
+            public Scanner(TextReader reader, TextWriter writer)
+            {
+                this.reader = reader;
+                this.writer = writer;
+            }
+
+            int Read()
+            {
+                if (peeked != -2) { int c = peeked; peeked = -2; return c; }
+                return reader.Read();
+            }
+
+            int Peek()
+            {
+                if (peeked == -2) peeked = reader.Read();
+                return peeked;
+            }
+
+            static bool IsWhitespace(int c)
+            {
+                return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+            }
+
+            public void Run()
+            {
+                bool inText = false;
+                while (true)
+                {
+                    int c = Read();
+                    if (c < 0)
+                    {
+                        FlushPending(false);
+                        break;
+                    }
+
+                    if (c != '<')
+                    {
+                        if (inText)
+                        {
+                            writer.Write((char)c);
+                        }
+                        else if (IsWhitespace(c))
+                        {
+                            pending.Append((char)c);
+                        }
+                        else
+                        {
+                            // Leading whitespace belongs to this text value: keep it.
+                            if (pending.Length > 0) { writer.Write(pending.ToString()); pending.Length = 0; }
+                            writer.Write((char)c);
+                            inText = true;
+                            MarkText();
+                        }
+                        continue;
+                    }
+
+                    inText = false;
+                    int next = Peek();
+                    if (next == '/')
+                    {
+                        Read();
+                        FlushPending(true);
+                        writer.Write("</");
+                        CopyTag();
+                        if (preserveStack.Count > 0)
+                        {
+                            preserveStack.RemoveAt(preserveStack.Count - 1);
+                            hasTextStack.RemoveAt(hasTextStack.Count - 1);
+                        }
+                        previousWasStartTag = false;
+                    }
+                    else if (next == '?')
+                    {
+                        Read();
+                        FlushPending(false);
+                        writer.Write("<?");
+                        CopyUntil("?>");
+                        previousWasStartTag = false;
+                    }
+                    else if (next == '!')
+                    {
+                        Read();
+                        int kind = Peek();
+                        if (kind == '-')
+                        {
+                            FlushPending(false);
+                            writer.Write("<!");
+                            CopyUntil("-->");
+                        }
+                        else if (kind == '[')
+                        {
+                            FlushPending(false);
+                            writer.Write("<!");
+                            CopyUntil("]]>");
+                            MarkText();
+                        }
+                        else
+                        {
+                            FlushPending(false);
+                            writer.Write("<!");
+                            CopyDeclaration();
+                        }
+                        previousWasStartTag = false;
+                    }
+                    else
+                    {
+                        FlushPending(false);
+                        writer.Write('<');
+                        bool isEmpty = CopyTag();
+                        if (!isEmpty)
+                        {
+                            bool inherited = preserveStack.Count > 0 && preserveStack[preserveStack.Count - 1];
+                            Match space = XmlSpaceAttribute.Match(tag.ToString());
+                            bool preserve = space.Success
+                                ? (space.Groups[1].Value + space.Groups[2].Value) == "preserve"
+                                : inherited;
+                            preserveStack.Add(preserve);
+                            hasTextStack.Add(false);
+                        }
+                        previousWasStartTag = !isEmpty;
+                    }
+                }
+            }
+
+            void MarkText()
+            {
+                if (hasTextStack.Count > 0) hasTextStack[hasTextStack.Count - 1] = true;
+                previousWasStartTag = false;
+            }
+
+            // Decides what to do with a whitespace-only run once the following token is known.
+            void FlushPending(bool nextIsEndTag)
+            {
+                if (pending.Length == 0) return;
+                int depth = preserveStack.Count;
+                bool keep = false;
+                if (depth > 0)
+                {
+                    keep = preserveStack[depth - 1]                 // xml:space="preserve"
+                        || (previousWasStartTag && nextIsEndTag)    // the element's whole value, e.g. <a> </a>
+                        || hasTextStack[depth - 1]                  // mixed content: spacing is part of the text
+                        || !ContainsLineBreak(pending);             // inline spacing, not indentation
+                }
+                if (keep) writer.Write(pending.ToString());
+                pending.Length = 0;
+            }
+
+            static bool ContainsLineBreak(StringBuilder value)
+            {
+                for (int i = 0; i < value.Length; i++)
+                {
+                    if (value[i] == '\r' || value[i] == '\n') return true;
+                }
+                return false;
+            }
+
+            // Copies a start or end tag through its closing '>'. Attribute values are
+            // copied verbatim; a whitespace run between attributes that spans lines is
+            // written as a single space so the tag stays on one line. Returns true for
+            // an empty-element tag (<a/>).
+            bool CopyTag()
+            {
+                tag.Length = 0;
+                StringBuilder gap = new StringBuilder();
+                int quote = 0;
+                int lastSignificant = 0;
+                while (true)
+                {
+                    int c = Read();
+                    if (c < 0) break;
+                    if (quote != 0)
+                    {
+                        tag.Append((char)c);
+                        if (c == quote) quote = 0;
+                        lastSignificant = c;
+                        continue;
+                    }
+                    if (IsWhitespace(c))
+                    {
+                        gap.Append((char)c);
+                        continue;
+                    }
+                    if (gap.Length > 0)
+                    {
+                        tag.Append(ContainsLineBreak(gap) ? " " : gap.ToString());
+                        gap.Length = 0;
+                    }
+                    tag.Append((char)c);
+                    if (c == '>') break;
+                    if (c == '"' || c == '\'') quote = c;
+                    lastSignificant = c;
+                }
+                writer.Write(tag.ToString());
+                return lastSignificant == '/';
+            }
+
+            void CopyUntil(string terminator)
+            {
+                int length = terminator.Length;
+                char[] window = new char[length];
+                int seen = 0;
+                while (true)
+                {
+                    int c = Read();
+                    if (c < 0) return;
+                    writer.Write((char)c);
+                    Array.Copy(window, 1, window, 0, length - 1);
+                    window[length - 1] = (char)c;
+                    if (++seen >= length && new string(window) == terminator) return;
+                }
+            }
+
+            // Copies <!DOCTYPE ...> (including an internal subset) verbatim.
+            void CopyDeclaration()
+            {
+                int quote = 0;
+                int bracketDepth = 0;
+                char[] tail = new char[4];
+                while (true)
+                {
+                    int c = Read();
+                    if (c < 0) return;
+                    writer.Write((char)c);
+                    if (quote != 0)
+                    {
+                        if (c == quote) quote = 0;
+                        continue;
+                    }
+                    Array.Copy(tail, 1, tail, 0, 3);
+                    tail[3] = (char)c;
+                    if (new string(tail) == "<!--") { CopyUntil("-->"); tail = new char[4]; continue; }
+                    if (c == '"' || c == '\'') quote = c;
+                    else if (c == '[') bracketDepth++;
+                    else if (c == ']') bracketDepth--;
+                    else if (c == '>' && bracketDepth <= 0) return;
+                }
+            }
+        }
     }
 }
+"@
 
-function Write-XMLReaderToWriter {
-    param(
-        [System.Xml.XmlReader]$reader,
-        [System.Xml.XmlWriter]$writer
-    )
-
-    $elementStates = New-Object System.Collections.ArrayList
-    while ($reader.Read()) {
-        $nodeType = $reader.NodeType.ToString()
-        $parentState = if ($elementStates.Count -gt 0) { $elementStates[$elementStates.Count - 1] } else { $null }
-
-        if ($nodeType -eq "Whitespace" -and $null -ne $parentState) {
-            [void]$parentState.PendingWhitespace.Append($reader.Value)
-            continue
-        }
-
-        if ($null -ne $parentState -and $parentState.PendingWhitespace.Length -gt 0) {
-            $nextNodeStartsMarkup = $nodeType -in @("Element", "Comment", "ProcessingInstruction")
-            $nextNodeIsMarkup = $nextNodeStartsMarkup -or $nodeType -eq "EndElement"
-            $pendingWhitespace = $parentState.PendingWhitespace.ToString()
-            $containsLineBreak = $pendingWhitespace.IndexOfAny($script:XmlLineBreakCharacters) -ge 0
-            $isIndentation = -not $parentState.HasTextContent -and $nextNodeIsMarkup -and (
-                $parentState.LastChildWasMarkup -or ($nextNodeStartsMarkup -and $containsLineBreak)
-            )
-
-            if (-not $isIndentation) {
-                Write-XMLTextPreservingLineBreaks -writer $writer -value $pendingWhitespace
-                $parentState.LastChildWasMarkup = $false
-                $parentState.HasTextContent = $true
-            }
-            $parentState.PendingWhitespace.Clear() | Out-Null
-        }
-
-        switch ($reader.NodeType.ToString()) {
-            "XmlDeclaration" {
-                if ($reader.Value -match 'standalone\s*=\s*["'']yes["'']') {
-                    $writer.WriteStartDocument($true)
-                } elseif ($reader.Value -match 'standalone\s*=\s*["'']no["'']') {
-                    $writer.WriteStartDocument($false)
-                } else {
-                    $writer.WriteStartDocument()
-                }
-                break
-            }
-            "Element" {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $true
-                }
-                $writer.WriteStartElement($reader.Prefix, $reader.LocalName, $reader.NamespaceURI)
-                if ($reader.MoveToFirstAttribute()) {
-                    do {
-                        $writer.WriteStartAttribute($reader.Prefix, $reader.LocalName, $reader.NamespaceURI)
-                        $writer.WriteString($reader.Value)
-                        $writer.WriteEndAttribute()
-                    } while ($reader.MoveToNextAttribute())
-                    $reader.MoveToElement() | Out-Null
-                }
-                if ($reader.IsEmptyElement) {
-                    $writer.WriteEndElement()
-                } else {
-                    [void]$elementStates.Add(@{
-                        PendingWhitespace = New-Object System.Text.StringBuilder
-                        LastChildWasMarkup = $false
-                        HasTextContent = $false
-                    })
-                }
-                break
-            }
-            "EndElement" {
-                $writer.WriteFullEndElement()
-                if ($elementStates.Count -gt 0) {
-                    $elementStates.RemoveAt($elementStates.Count - 1)
-                }
-                break
-            }
-            { $_ -in @("Text", "CDATA") } {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $false
-                    $parentState.HasTextContent = $true
-                }
-                # CDATA is emitted as ordinary text; character references preserve
-                # line breaks in real text while keeping the serialized XML on one line.
-                Write-XMLTextPreservingLineBreaks -writer $writer -value $reader.Value
-                break
-            }
-            "SignificantWhitespace" {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $false
-                    $parentState.HasTextContent = $true
-                }
-                if ($null -ne $parentState) {
-                    Write-XMLTextPreservingLineBreaks -writer $writer -value $reader.Value
-                }
-                break
-            }
-            "Comment" {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $true
-                }
-                $writer.WriteComment([System.Text.RegularExpressions.Regex]::Replace($reader.Value, "`r`n|`r|`n", " "))
-                break
-            }
-            "ProcessingInstruction" {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $true
-                }
-                $writer.WriteProcessingInstruction(
-                    $reader.Name,
-                    [System.Text.RegularExpressions.Regex]::Replace($reader.Value, "`r`n|`r|`n", " ")
-                )
-                break
-            }
-            "DocumentType" {
-                $writer.WriteDocType(
-                    $reader.Name,
-                    $reader.GetAttribute("PUBLIC"),
-                    $reader.GetAttribute("SYSTEM"),
-                    $reader.Value
-                )
-                break
-            }
-            "EntityReference" {
-                if ($null -ne $parentState) {
-                    $parentState.LastChildWasMarkup = $false
-                }
-                $writer.WriteEntityRef($reader.Name)
-                break
-            }
-        }
-    }
-}
-
-function Test-FileContainsLineBreak {
+function Test-XmlWellFormed {
     param([string]$FilePath)
 
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Ignore
+    $settings.XmlResolver = $null
     $reader = $null
     try {
-        $reader = New-Object System.IO.StreamReader($FilePath, $true)
-        $buffer = New-Object char[] 8192
-        while (($read = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $chunk = New-Object string($buffer, 0, $read)
-            if ($chunk.IndexOfAny($script:XmlLineBreakCharacters) -ge 0) {
-                return $true
-            }
-        }
-        return $false
+        $reader = [System.Xml.XmlReader]::Create($FilePath, $settings)
+        while ($reader.Read()) { }
     }
     finally {
         if ($null -ne $reader) {
@@ -192,12 +359,42 @@ function Test-FileContainsLineBreak {
     }
 }
 
+function Invoke-XMLMinify {
+    param(
+        [string]$inputFilePath,
+        [string]$outputFilePath
+    )
+
+    # Refuse malformed XML before writing anything, like formatting does.
+    Test-XmlWellFormed -FilePath $inputFilePath
+    if (-not ('AnyaXml.LexicalMinifier' -as [type])) {
+        Add-Type -TypeDefinition $script:LexicalMinifierSource -Language CSharp
+    }
+    [AnyaXml.LexicalMinifier]::Minify($inputFilePath, $outputFilePath)
+}
+
+function Get-IndentChars {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -ieq "tab" -or $Value -ieq "tabs") {
+        return "`t"
+    }
+    $spaces = 0
+    if ([int]::TryParse($Value, [ref]$spaces) -and $spaces -ge 1 -and $spaces -le 8) {
+        return " " * $spaces
+    }
+    throw "Unsupported indent '$Value'. Use 'tab' or a number of spaces from 1 to 8."
+}
+
 function Test-FileHasXmlDeclaration {
     param([string]$FilePath)
 
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Ignore
+    $settings.XmlResolver = $null
     $reader = $null
     try {
-        $reader = [System.Xml.XmlReader]::Create($FilePath)
+        $reader = [System.Xml.XmlReader]::Create($FilePath, $settings)
         return $reader.Read() -and $reader.NodeType -eq [System.Xml.XmlNodeType]::XmlDeclaration
     }
     finally {
@@ -207,47 +404,26 @@ function Test-FileHasXmlDeclaration {
     }
 }
 
+function Test-FileHasUtf8Bom {
+    param([string]$FilePath)
+
+    $stream = [System.IO.File]::OpenRead($FilePath)
+    try {
+        $bytes = New-Object byte[] 3
+        $read = $stream.Read($bytes, 0, 3)
+        return $read -eq 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Format-XMLContent {
     param(
         [string]$inputFilePath,
-        [Alias("OneLine")]
-        [switch]$Minify
+        [string]$indentChars,
+        [System.Text.Encoding]$outputEncoding
     )
-
-    if ($Minify) {
-        $readerSettings = New-Object System.Xml.XmlReaderSettings
-        $readerSettings.ConformanceLevel = "Document"
-        $readerSettings.IgnoreWhitespace = $false
-
-        $settings = New-Object System.Xml.XmlWriterSettings
-        $settings.Indent = $false
-        $settings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
-        $settings.NewLineHandling = [System.Xml.NewLineHandling]::Entitize
-
-        $tempFile = [System.IO.Path]::GetTempFileName()
-        $reader = $null
-        $writer = $null
-        try {
-            $reader = [System.Xml.XmlReader]::Create($inputFilePath, $readerSettings)
-            $writer = [System.Xml.XmlWriter]::Create($tempFile, $settings)
-            Write-XMLReaderToWriter -reader $reader -writer $writer
-            $writer.Flush()
-            $writer.Close()
-            $writer = $null
-            return [System.IO.File]::ReadAllText($tempFile, [System.Text.Encoding]::UTF8)
-        }
-        finally {
-            if ($null -ne $reader) {
-                $reader.Dispose()
-            }
-            if ($null -ne $writer) {
-                $writer.Dispose()
-            }
-            if (Test-Path -LiteralPath $tempFile) {
-                Remove-Item -LiteralPath $tempFile -Force
-            }
-        }
-    }
 
     $xml = New-Object System.Xml.XmlDocument
     # Loading the file directly lets the XML parser honor its BOM or declared
@@ -256,8 +432,10 @@ function Format-XMLContent {
 
     $settings = New-Object System.Xml.XmlWriterSettings
     $settings.Indent = $true
-    $settings.IndentChars = "  "
+    $settings.IndentChars = $indentChars
     $settings.NewLineChars = "`n"
+    $settings.Encoding = $outputEncoding
+    $settings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
 
     $tempFile = [System.IO.Path]::GetTempFileName()
     $writer = $null
@@ -268,7 +446,7 @@ function Format-XMLContent {
         $writer.Close()
         $writer = $null
 
-        return [System.IO.File]::ReadAllText($tempFile, [System.Text.Encoding]::UTF8)
+        return [System.IO.File]::ReadAllText($tempFile, $outputEncoding)
     }
     finally {
         if ($null -ne $writer) {
@@ -284,26 +462,21 @@ function Format-XMLContentStreaming {
     param(
         [string]$inputFilePath,
         [string]$outputFilePath,
-        [Alias("OneLine")]
-        [switch]$Minify
+        [string]$indentChars,
+        [System.Text.Encoding]$outputEncoding
     )
 
     $readerSettings = New-Object System.Xml.XmlReaderSettings
     $readerSettings.ConformanceLevel = "Document"
-    # Keep whitespace nodes so the minifier can remove indentation only when it
-    # appears between markup, while preserving whitespace in text-only content.
-    $readerSettings.IgnoreWhitespace = $false
+    $readerSettings.IgnoreWhitespace = $true
 
     $writerSettings = New-Object System.Xml.XmlWriterSettings
     $writerSettings.ConformanceLevel = [System.Xml.ConformanceLevel]::Document
-    $writerSettings.Indent = -not $Minify
-    $writerSettings.IndentChars = "  "
+    $writerSettings.Indent = $true
+    $writerSettings.IndentChars = $indentChars
     $writerSettings.NewLineChars = "`n"
-    if ($Minify) {
-        $writerSettings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
-        $writerSettings.NewLineHandling = [System.Xml.NewLineHandling]::Entitize
-    }
-    $writerSettings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $writerSettings.Encoding = $outputEncoding
+    $writerSettings.OmitXmlDeclaration = -not (Test-FileHasXmlDeclaration -FilePath $inputFilePath)
 
     $reader = $null
     $writer = $null
@@ -311,9 +484,7 @@ function Format-XMLContentStreaming {
         $reader = [System.Xml.XmlReader]::Create($inputFilePath, $readerSettings)
         $writer = [System.Xml.XmlWriter]::Create($outputFilePath, $writerSettings)
 
-        if ($Minify) {
-            Write-XMLReaderToWriter -reader $reader -writer $writer
-        } elseif ($reader.Read()) {
+        if ($reader.Read()) {
             do {
                 # WriteNode advances the reader to the next sibling, so do not call Read() again here.
                 $writer.WriteNode($reader, $false)
@@ -389,24 +560,21 @@ try {
         $Streaming = $true
     }
 
-    if ($Streaming) {
-        $action = if ($Minify) { "minifying" } else { "formatting" }
-        Write-Host "Reading and $action XML (streaming mode)..." -ForegroundColor Yellow
-        Format-XMLContentStreaming -inputFilePath $inputPath -outputFilePath $temporaryOutputPath -Minify:$Minify
+    if ($Minify) {
+        Write-Host "Minifying XML..." -ForegroundColor Yellow
+        Invoke-XMLMinify -inputFilePath $inputPath -outputFilePath $temporaryOutputPath
     } else {
-        Write-Host "Reading XML file..." -ForegroundColor Yellow
-        $action = if ($Minify) { "Minifying" } else { "Formatting" }
-        Write-Host "$action XML..." -ForegroundColor Yellow
-        $formattedXml = Format-XMLContent -inputFilePath $inputPath -Minify:$Minify
-        [System.IO.File]::WriteAllText($temporaryOutputPath, $formattedXml, [System.Text.Encoding]::UTF8)
-    }
-
-    # XmlWriter can normalize a compact single-line source into a slightly
-    # longer equivalent form (for example, spacing empty-element tags). Keep
-    # the original bytes when that would make an already one-line input larger.
-    if ($Minify -and (Get-Item -Force -LiteralPath $temporaryOutputPath).Length -gt (Get-Item -Force -LiteralPath $inputPath).Length) {
-        if (-not (Test-FileContainsLineBreak -FilePath $inputPath)) {
-            Copy-Item -LiteralPath $inputPath -Destination $temporaryOutputPath -Force
+        $indentChars = Get-IndentChars -Value $Indent
+        # Keep the input's BOM choice so normal and streaming output match.
+        $outputEncoding = New-Object System.Text.UTF8Encoding((Test-FileHasUtf8Bom -FilePath $inputPath))
+        if ($Streaming) {
+            Write-Host "Reading and formatting XML (streaming mode)..." -ForegroundColor Yellow
+            Format-XMLContentStreaming -inputFilePath $inputPath -outputFilePath $temporaryOutputPath -indentChars $indentChars -outputEncoding $outputEncoding
+        } else {
+            Write-Host "Reading XML file..." -ForegroundColor Yellow
+            Write-Host "Formatting XML..." -ForegroundColor Yellow
+            $formattedXml = Format-XMLContent -inputFilePath $inputPath -indentChars $indentChars -outputEncoding $outputEncoding
+            [System.IO.File]::WriteAllText($temporaryOutputPath, $formattedXml, $outputEncoding)
         }
     }
 

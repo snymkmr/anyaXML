@@ -92,6 +92,21 @@
     "configuration": {
       "title": "AnyaXML",
       "properties": {
+        "anyaxml.indent": {
+          "type": "string",
+          "enum": [
+            "tab",
+            "2",
+            "4"
+          ],
+          "enumDescriptions": [
+            "Indent each level with one tab.",
+            "Indent each level with 2 spaces.",
+            "Indent each level with 4 spaces."
+          ],
+          "default": "tab",
+          "description": "Indentation used by AnyaXML: Format XML Document."
+        },
         "anyaxml.powershellExecutable": {
           "type": "string",
           "default": "",
@@ -113,6 +128,7 @@
   "scripts": {
     "test": "npm run compile && node --test",
     "compile": "tsc -p ./",
+    "package": "vsce package -o dist/",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
